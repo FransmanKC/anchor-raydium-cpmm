@@ -2,7 +2,7 @@
 name = "anchor-raydium-cpmm"
 version = "0.1.0"
 description = "Graduate a token from an Anchor program into a Raydium CPMM pool and lock the liquidity"
-authors = ["riff contributors"]
+authors = ["Kevin Fransman"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/KevinGod1234/anchor-raydium-cpmm"
 readme = "README.md"
