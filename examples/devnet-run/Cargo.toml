@@ -1,0 +1,21 @@
+[package]
+name = "devnet-run"
+version = "0.0.0"
+description = "Graduates one launch of the example program on devnet and checks the result"
+edition = "2021"
+publish = false
+
+# Kept out of the main workspace: the RPC client's dependency tree never
+# reaches CI, cargo-audit or the published crate.
+[workspace]
+
+[dependencies]
+launchpad = { path = "../launchpad", features = ["devnet", "no-entrypoint"] }
+anchor-raydium-cpmm = { path = "../..", features = ["devnet"] }
+anchor-lang = "1.2.1"
+anchor-spl = { version = "1.2.1", default-features = false, features = ["associated_token", "token", "token_2022", "solana-v3"] }
+solana-rpc-client = "3.1"
+solana-commitment-config = "3"
+solana-keypair = "3"
+solana-signer = "3"
+solana-transaction = "3"

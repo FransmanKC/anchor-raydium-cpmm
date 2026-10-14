@@ -282,9 +282,40 @@ for the following:
 Build with `features = ["devnet"]` to use Raydium's devnet program
 (`DRaycp…pYb`) and fee receiver. Use a **devnet** `AmmConfig`. Mainnet fee
 tiers don't exist on devnet, and the crate rejects an `AmmConfig` that isn't
-owned by the program it was built for. The tests run against mainnet
-snapshots only; the devnet build is checked by a unit test of its addresses
-and by clippy.
+owned by the program it was built for. `pda::amm_config(0)` gives devnet's
+tier 0 (`5MxLgy…`, 0.25% trade fee, 0.15 SOL pool-creation fee) in a devnet
+build.
+
+**Run on devnet (2026-10-14).** The example program, deployed at
+[`gLsQWe…dcao`](https://explorer.solana.com/address/gLsQWeuzGvG34fKuCwxMbK6zwNUU6Lqoi1173zVdcao?cluster=devnet),
+graduated a launch of 0.3 SOL and 1,000,000 tokens in
+[one transaction](https://explorer.solana.com/tx/2J3Cxh58GHr1tNQb1eNNTGPgAXcWAMDbvYkHwbjz5bpAPWNPf5wPDbABJgcQteaodyzcHRuXEUbiGNskp19JSAZK?cluster=devnet)
+(prepare + graduate, about 204k compute units) into
+[this pool](https://explorer.solana.com/address/65D956f3SvBDEA8iuaihQd7nFR2v76hkzasUw3K9rdRf?cluster=devnet).
+Read back from devnet: the vaults hold exactly the tracked amounts, the LP
+supply is 0, and every temporary account is closed. It cost the payer
+0.179 SOL; devnet's Raydium build creates slightly smaller accounts than
+mainnet's (0.190 SOL in the tests).
+
+To repeat it against the deployed example with your own devnet wallet
+(about 0.6 devnet SOL):
+
+```bash
+cargo run --manifest-path examples/devnet-run/Cargo.toml -- ~/.config/solana/devnet.json
+```
+
+To deploy the example yourself, give it your own program ID (`declare_id!`
+in `examples/launchpad/src/lib.rs`), then:
+
+```bash
+cargo build-sbf --manifest-path examples/launchpad/Cargo.toml --arch v0 \
+  --features devnet --sbf-out-dir target/devnet/deploy
+solana program deploy target/devnet/deploy/launchpad.so \
+  --program-id <program-keypair.json> --url devnet
+```
+
+`examples/devnet-run` is a separate crate outside the workspace, so its RPC
+client never reaches CI or the published crate.
 
 ## Limitations
 

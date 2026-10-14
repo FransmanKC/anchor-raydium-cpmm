@@ -19,7 +19,7 @@ use anchor_spl::{
 };
 use solana_instructions_sysvar::{load_current_index_checked, load_instruction_at_checked};
 
-declare_id!("EBLM5gfpUpxDnei7B9Hggqp8K8MNMDbiwKhrYhad9Qf5");
+declare_id!("gLsQWeuzGvG34fKuCwxMbK6zwNUU6Lqoi1173zVdcao");
 
 pub const LAUNCH_SEED: &[u8] = b"launch";
 /// System-owned PDA that signs as the Raydium pool creator.
