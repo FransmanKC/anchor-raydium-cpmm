@@ -5,13 +5,13 @@ description = "Graduate a token from an Anchor program into a Raydium CPMM pool 
 authors = ["Kevin Fransman"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/KevinGod1234/anchor-raydium-cpmm"
-readme = "README.md"
+readme = "README.crates-io.md"
 keywords = ["solana", "anchor", "raydium", "launchpad", "amm"]
 categories = ["cryptography::cryptocurrencies"]
 edition.workspace = true
 rust-version.workspace = true
 autoexamples = false
-include = ["src/**", "README.md", "LICENSE-*"]
+include = ["src/**", "README.crates-io.md", "LICENSE-*"]
 
 [features]
 # Use Raydium's devnet addresses instead of mainnet.
