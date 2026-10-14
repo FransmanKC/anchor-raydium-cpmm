@@ -77,7 +77,7 @@ fn launch(base_program: Pubkey, base_before_wsol: bool) -> Launch {
     load_fixtures(&mut svm);
 
     let mint = loop {
-        let k = Pubkey::new_unique();
+        let k = Keypair::new().pubkey();
         if (k < native_mint::ID) == base_before_wsol {
             break k;
         }
