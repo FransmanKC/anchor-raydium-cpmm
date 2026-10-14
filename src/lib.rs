@@ -37,7 +37,7 @@ pub const RENT_ALLOWANCE: u64 = 100_000_000;
 pub enum GraduateError {
     #[msg("AmmConfig is not a Raydium CPMM account")]
     InvalidAmmConfig,
-    #[msg("Account is not the expected program or mint")]
+    #[msg("Account is not the expected program or mint, or the mint is not writable")]
     InvalidAccount,
     #[msg("SOL and token amounts must both be above zero")]
     ZeroAmount,
@@ -126,6 +126,10 @@ pub enum LpLock<'info> {
     Burn,
     /// Send them to `owner`'s associated LP token account (`token_account`),
     /// created here if needed. Use for a locker program or a multisig.
+    ///
+    /// Take `owner` from your program's state, fixed before graduation.
+    /// Never let the caller choose it: whoever receives the LP tokens can
+    /// withdraw the whole pool.
     SendTo {
         owner: AccountInfo<'info>,
         token_account: AccountInfo<'info>,
@@ -182,7 +186,10 @@ pub fn graduate<'info>(
             && a.wsol_mint.key() == native_mint::ID
             && a.token_program.key() == token::ID
             && (base_program == token::ID || base_program == token_2022::ID)
-            && *a.base_mint.owner == base_program,
+            && *a.base_mint.owner == base_program
+            // Burning stray tokens writes the mint; without this, one
+            // donated token would block graduation.
+            && a.base_mint.is_writable,
         GraduateError::InvalidAccount
     );
     let auth = &a.authority;

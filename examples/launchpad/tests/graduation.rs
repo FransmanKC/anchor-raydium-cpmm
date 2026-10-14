@@ -44,6 +44,8 @@ const TX_FEE: u64 = 5_000;
 const COMPUTE_BUDGET: Pubkey =
     Pubkey::from_str_const("ComputeBudget111111111111111111111111111111");
 const RENT_SYSVAR: Pubkey = Pubkey::from_str_const("SysvarRent111111111111111111111111111111111");
+const INSTRUCTIONS_SYSVAR: Pubkey =
+    Pubkey::from_str_const("Sysvar1nstructions1111111111111111111111111");
 
 struct Launch {
     svm: LiteSVM,
@@ -63,10 +65,22 @@ fn pool(l: &Launch) -> Pubkey {
     pda(POOL_SEED, &l.mint)
 }
 
-/// A launch holding SOL_AMOUNT and TOKEN_AMOUNT, ready to graduate. The
-/// mint sorts before or after wrapped SOL as asked, since Raydium orders
-/// the pool's two sides by address.
+/// A launch holding SOL_AMOUNT and TOKEN_AMOUNT, ready to graduate and burn
+/// its LP. The mint sorts before or after wrapped SOL as asked, since
+/// Raydium orders the pool's two sides by address.
 fn launch(base_program: Pubkey, base_before_wsol: bool) -> Launch {
+    launch_with(base_program, base_before_wsol, None, &|svm, mint| {
+        set_mint(svm, mint, base_program, TOKEN_AMOUNT)
+    })
+}
+
+/// Like [`launch`], with an LP recipient and a custom mint.
+fn launch_with(
+    base_program: Pubkey,
+    base_before_wsol: bool,
+    lp_recipient: Option<Pubkey>,
+    setup_mint: &dyn Fn(&mut LiteSVM, Pubkey),
+) -> Launch {
     let mut svm = LiteSVM::new();
     let so = std::fs::read(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -83,7 +97,7 @@ fn launch(base_program: Pubkey, base_before_wsol: bool) -> Launch {
         }
     };
     let creator = funded(&mut svm);
-    set_mint(&mut svm, mint, base_program, TOKEN_AMOUNT);
+    setup_mint(&mut svm, mint);
     let creator_tokens = ata(&creator.pubkey(), &mint, &base_program);
     set_token_account(
         &mut svm,
@@ -99,6 +113,7 @@ fn launch(base_program: Pubkey, base_before_wsol: bool) -> Launch {
         &launchpad::instruction::CreateLaunch {
             sol_amount: SOL_AMOUNT,
             token_amount: TOKEN_AMOUNT,
+            lp_recipient,
         }
         .data(),
         launchpad::accounts::CreateLaunch {
@@ -128,6 +143,7 @@ fn prepare_ix(l: &Launch) -> Instruction {
         launchpad::accounts::Prepare {
             launch: pda(LAUNCH_SEED, &l.mint),
             graduation_authority: authority(l),
+            instructions: INSTRUCTIONS_SYSVAR,
         }
         .to_account_metas(None),
     )
@@ -261,9 +277,11 @@ fn token_2022_mint_sorting_after_wsol() {
 
 #[test]
 fn send_to_delivers_every_lp_token() {
-    let mut l = launch(TOKEN_2022_ID, false);
-    let payer = funded(&mut l.svm);
     let recipient = Pubkey::new_unique();
+    let mut l = launch_with(TOKEN_2022_ID, false, Some(recipient), &|svm, mint| {
+        set_mint(svm, mint, TOKEN_2022_ID, TOKEN_AMOUNT)
+    });
+    let payer = funded(&mut l.svm);
     let before = lamports(&l.svm, &payer.pubkey());
     let meta = graduate(&mut l, &payer, Some(recipient)).unwrap();
     let spent = before - lamports(&l.svm, &payer.pubkey());
@@ -356,13 +374,58 @@ fn graduate_without_prepare_fails() {
 #[test]
 fn amm_config_not_owned_by_raydium_fails() {
     let mut l = launch(TOKEN_ID, true);
-    // Same bytes as the real fee tier, with a 0 pool-creation fee, but
-    // owned by someone else.
+    // The pinned tier's address, holding the real bytes with a 0
+    // pool-creation fee but owned by someone else. (The example's seeds
+    // constraint passes; the crate's owner check must catch it.)
     let mut fake = l.svm.get_account(&AMM_CONFIG).unwrap();
     fake.data[ids::AMM_CONFIG_CREATE_POOL_FEE_OFFSET..][..8].fill(0);
     fake.owner = Pubkey::new_unique();
-    let fake_key = Pubkey::new_unique();
-    l.svm.set_account(fake_key, fake).unwrap();
+    l.svm.set_account(AMM_CONFIG, fake).unwrap();
+
+    let payer = funded(&mut l.svm);
+    let res = graduate(&mut l, &payer, None);
+    assert_error(res, u32::from(GraduateError::InvalidAmmConfig));
+}
+
+// --- regressions from the security review -----------------------------------
+
+/// Was critical: the example let whoever called `graduate` name the LP
+/// recipient, take every LP token and withdraw the pool.
+#[test]
+fn caller_cannot_choose_the_lp_recipient() {
+    let wrong = u32::from(LaunchpadError::WrongLpRecipient);
+    // A launch that burns: a recipient the caller passes is ignored and
+    // every LP token is still burned.
+    let mut l = launch(TOKEN_ID, true);
+    let attacker = funded(&mut l.svm);
+    graduate(&mut l, &attacker, Some(attacker.pubkey())).unwrap();
+    let lp_mint = pda::lp_mint(&pool(&l)).0;
+    assert_eq!(mint_supply(&l.svm, &lp_mint), 0);
+    assert_eq!(
+        lamports(&l.svm, &ata(&attacker.pubkey(), &lp_mint, &TOKEN_ID)),
+        0
+    );
+    // A launch with a recipient: another one, or none, is refused.
+    let recipient = Pubkey::new_unique();
+    let mut l = launch_with(TOKEN_2022_ID, false, Some(recipient), &|svm, mint| {
+        set_mint(svm, mint, TOKEN_2022_ID, TOKEN_AMOUNT)
+    });
+    let attacker = funded(&mut l.svm);
+    assert_error(graduate(&mut l, &attacker, Some(attacker.pubkey())), wrong);
+    assert_error(graduate(&mut l, &attacker, None), wrong);
+    graduate(&mut l, &attacker, Some(recipient)).unwrap();
+}
+
+/// Was medium: the fee tier wasn't pinned, so the first caller chose it.
+#[test]
+fn fee_tier_is_pinned() {
+    let mut l = launch(TOKEN_ID, true);
+    // A Raydium-owned tier like mainnet's 4% one.
+    let mut acc = l.svm.get_account(&AMM_CONFIG).unwrap();
+    acc.data[10..12].copy_from_slice(&3u16.to_le_bytes());
+    acc.data[12..20].copy_from_slice(&40_000u64.to_le_bytes());
+    let four_percent = Pubkey::new_unique();
+    l.svm.set_account(four_percent, acc).unwrap();
 
     let payer = funded(&mut l.svm);
     let mut ix = graduate_ix(&l, &payer.pubkey(), None);
@@ -370,10 +433,84 @@ fn amm_config_not_owned_by_raydium_fails() {
         .iter_mut()
         .find(|m| m.pubkey == AMM_CONFIG)
         .unwrap()
-        .pubkey = fake_key;
+        .pubkey = four_percent;
     let ixs = [compute_budget_ix(1_400_000), prepare_ix(&l), ix];
     let res = send(&mut l.svm, &ixs, &[&payer]);
-    assert_error(res, u32::from(GraduateError::InvalidAmmConfig));
+    assert_error(res, 2006); // Anchor ConstraintSeeds
+}
+
+/// Was low: `prepare` alone moved the SOL; if graduation then couldn't
+/// succeed, the SOL was stranded on the authority for good.
+#[test]
+fn prepare_only_runs_right_before_graduate() {
+    let must_follow = u32::from(LaunchpadError::GraduateMustFollow);
+    let mut l = launch(TOKEN_ID, true);
+    let stranger = funded(&mut l.svm);
+    let alone = [prepare_ix(&l)];
+    assert_error(send(&mut l.svm, &alone, &[&stranger]), must_follow);
+    let ixs = [prepare_ix(&l), compute_budget_ix(1_400_000)];
+    assert_error(send(&mut l.svm, &ixs, &[&stranger]), must_follow);
+
+    // A launch that can't graduate (its mint takes a 1% transfer fee):
+    // the transaction reverts as a whole and the SOL stays put.
+    let mut l = launch_with(TOKEN_2022_ID, true, None, &|svm, k| {
+        set_fee_mint(svm, k, 100)
+    });
+    let payer = funded(&mut l.svm);
+    let launch_lamports = lamports(&l.svm, &pda(LAUNCH_SEED, &l.mint));
+    assert!(graduate(&mut l, &payer, None).is_err());
+    assert_eq!(
+        lamports(&l.svm, &pda(LAUNCH_SEED, &l.mint)),
+        launch_lamports
+    );
+    assert_eq!(lamports(&l.svm, &authority(&l)), 0);
+    let launch: launchpad::Launch = fetch(&l.svm, &pda(LAUNCH_SEED, &l.mint));
+    assert!(!launch.prepared);
+}
+
+/// A transfer-fee mint set to 0 bps graduates (whoever holds its fee
+/// authority could raise the fee later and block graduation, though).
+#[test]
+fn zero_bps_transfer_fee_mint_graduates() {
+    let mut l = launch_with(TOKEN_2022_ID, false, None, &|svm, k| {
+        set_fee_mint(svm, k, 0)
+    });
+    let payer = funded(&mut l.svm);
+    graduate(&mut l, &payer, None).unwrap();
+}
+
+/// Lamports sent ahead of time to any address the graduation creates don't
+/// block it. Each target in its own launch.
+#[test]
+fn prefunded_addresses_do_not_block_graduation() {
+    let recipient = Pubkey::new_unique();
+    let mut failures = vec![];
+    for target in 0..8 {
+        for (program, before) in [(TOKEN_ID, true), (TOKEN_2022_ID, false)] {
+            let mut l = launch_with(program, before, Some(recipient), &|svm, mint| {
+                set_mint(svm, mint, program, TOKEN_AMOUNT)
+            });
+            let (p, auth) = (pool(&l), authority(&l));
+            let lp_mint = pda::lp_mint(&p).0;
+            let key = [
+                lp_mint,
+                pda::vault(&p, &l.mint).0,
+                pda::vault(&p, &native_mint::ID).0,
+                pda::observation(&p).0,
+                ata(&auth, &lp_mint, &TOKEN_ID),
+                ata(&recipient, &lp_mint, &TOKEN_ID),
+                ata(&auth, &l.mint, &program),
+                ata(&auth, &native_mint::ID, &TOKEN_ID),
+            ][target];
+            let r = rent(&l.svm, 0);
+            l.svm.airdrop(&key, r).unwrap();
+            let payer = funded(&mut l.svm);
+            if let Err(e) = graduate(&mut l, &payer, Some(recipient)) {
+                failures.push(format!("target {target} ({program}): {:?}", e.err));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "blocked by: {failures:#?}");
 }
 
 #[test]
@@ -565,6 +702,35 @@ fn set_mint(svm: &mut LiteSVM, key: Pubkey, program: Pubkey, supply: u64) {
     }
     .pack_into_slice(&mut data);
     set(svm, key, program, data);
+}
+
+/// A Token-2022 mint with a transfer fee of `bps` and no fee authority.
+fn set_fee_mint(svm: &mut LiteSVM, key: Pubkey, bps: u16) {
+    use anchor_spl::token_2022::spl_token_2022::extension::{
+        transfer_fee::{TransferFee, TransferFeeConfig},
+        BaseStateWithExtensionsMut, ExtensionType, StateWithExtensionsMut,
+    };
+    let len = ExtensionType::try_calculate_account_len::<Mint>(&[ExtensionType::TransferFeeConfig])
+        .unwrap();
+    let mut data = vec![0; len];
+    let mut state = StateWithExtensionsMut::<Mint>::unpack_uninitialized(&mut data).unwrap();
+    let fee = TransferFee {
+        epoch: 0.into(),
+        maximum_fee: u64::MAX.into(),
+        transfer_fee_basis_points: bps.into(),
+    };
+    let ext = state.init_extension::<TransferFeeConfig>(true).unwrap();
+    ext.older_transfer_fee = fee;
+    ext.newer_transfer_fee = fee;
+    state.base = Mint {
+        supply: TOKEN_AMOUNT,
+        decimals: DECIMALS,
+        is_initialized: true,
+        ..Mint::default()
+    };
+    state.pack_base();
+    state.init_account_type().unwrap();
+    set(svm, key, TOKEN_2022_ID, data);
 }
 
 fn set_token_account(

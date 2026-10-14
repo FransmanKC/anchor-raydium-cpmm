@@ -24,6 +24,7 @@ devnet = ["anchor-raydium-cpmm/devnet"]
 anchor-lang = "1.2.1"
 anchor-spl = { version = "1.2.1", default-features = false, features = ["associated_token", "token", "token_2022", "solana-v3"] }
 anchor-raydium-cpmm = { path = "../.." }
+solana-instructions-sysvar = "3.0.1"
 
 [dev-dependencies]
 litesvm = "0.10.0"

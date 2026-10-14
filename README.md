@@ -23,6 +23,7 @@ anchor-raydium-cpmm = { git = "https://github.com/KevinGod1234/anchor-raydium-cp
 [Costs](#costs) · [Errors](#errors) · [Security checklist](#security-checklist) ·
 [Devnet](#devnet) · [Limitations](#limitations) ·
 [Troubleshooting](#troubleshooting) · [API](#api) · [Tests](#tests) ·
+[Security review](#security-review) ·
 [Alternatives](#alternatives)
 
 Anchor 1.2, Solana 3.x crates, SPL Token or Token-2022 base mints, quote mint
@@ -81,8 +82,24 @@ state. Never compute them from `lamports()` or a token balance.
 
 **3. Write `prepare`**, a separate instruction that moves `sol_amount` from
 wherever your program keeps it to the graduation authority, and guards
-against running twice. If the SOL sits in a program-owned data account, move
-it directly:
+against running twice. It must **refuse to run unless the next instruction
+is your `graduate`**. Otherwise anyone can send `prepare` alone, and if
+graduation can't succeed afterwards the SOL is stuck on the authority. Check
+with the instructions sysvar (`solana-instructions-sysvar` crate):
+
+```rust
+let ixs = ctx.accounts.instructions.to_account_info(); // Sysvar1nstructions…
+let next = load_current_index_checked(&ixs)?
+    .checked_add(1)
+    .and_then(|i| load_instruction_at_checked(i.into(), &ixs).ok());
+require!(
+    next.is_some_and(|ix| ix.program_id == crate::ID
+        && ix.data.starts_with(instruction::Graduate::DISCRIMINATOR)),
+    MyError::GraduateMustFollow
+);
+```
+
+Then, if the SOL sits in a program-owned data account, move it directly:
 
 ```rust
 launch.sub_lamports(amount)?;
@@ -105,12 +122,17 @@ let outcome = anchor_raydium_cpmm::graduate(
         authority_seeds: &[GRADUATION_SEED, mint.as_ref(), &[authority_bump]],
         pool_seeds: &[POOL_SEED, mint.as_ref(), &[pool_bump]],
         token_source_seeds: &[LAUNCH_SEED, mint.as_ref(), &[launch.bump]],
-        lp_lock: LpLock::Burn,
+        lp_lock: LpLock::Burn, // or SendTo an owner taken from your state
         open_time: 0,
     },
 )?;
 launch.pool = Some(outcome.pool); // and refuse to graduate again
 ```
+
+`graduate` is usually permissionless, so **never let the caller choose
+where the LP tokens go**. Whoever holds them can withdraw the whole pool. For
+`LpLock::SendTo`, store the owner when the launch is created and check the
+passed account against it (the example does this).
 
 **5. Send both in one transaction** with a compute budget. Prepare plus
 graduate measured 197k to 258k compute units (it varies with the PDA bump
@@ -120,9 +142,19 @@ searches), more than the 200k default.
 [ ComputeBudget::SetComputeUnitLimit(400_000), prepare, graduate ]
 ```
 
-**6. Pin the fee tier.** The crate checks the `AmmConfig` is Raydium's; your
-program should also pin *which* tier it uses (the example accepts any, to
-stay short).
+**6. Pin the fee tier.** The crate checks the `AmmConfig` is Raydium's, but
+not *which* tier it is. Unpinned, the first caller picks the pool's trading
+fee forever (mainnet has tiers up to 4%). Pin it with Raydium's seeds, which
+also works on devnet:
+
+```rust
+#[account(
+    seeds = [ids::AMM_CONFIG_SEED, &FEE_TIER.to_be_bytes()], // FEE_TIER: u16 = 0
+    bump,
+    seeds::program = ids::CPMM_PROGRAM_ID,
+)]
+pub amm_config: UncheckedAccount<'info>,
+```
 
 ## Accounts
 
@@ -134,14 +166,14 @@ by anyone (the crate copes either way).
 |---|---|---|---|
 | `payer` | yes | yes (tx) | Fronts the fee and rent; gets the unspent part back. |
 | `authority` | yes | PDA | System-owned PDA of your program; must already hold `sol_amount`. Signs as pool creator. |
-| `base_mint` | yes | | The token. Owner must be `base_token_program` (crate). Writable to burn stray tokens. |
+| `base_mint` | yes | | The token. Owner must be `base_token_program`, and it must be writable (both checked by the crate): stray tokens are burned. |
 | `token_source` | yes | | Your vault holding the tokens. |
 | `token_source_authority` | | PDA or tx | Owner of `token_source`. |
 | `authority_base_account` | yes | | `authority`'s ATA for the mint. Created and closed here (address checked by the ATA program). |
 | `authority_wsol_account` | yes | | `authority`'s wrapped-SOL ATA. Created and closed here. |
 | `authority_lp_account` | yes | | `authority`'s LP ATA. Raydium creates it; closed here. |
 | `pool_state` | yes | PDA | Your pool PDA. Raydium creates it; only your program can sign for it. |
-| `amm_config` | | | Raydium fee tier. Owner checked by the crate; pin the tier yourself. |
+| `amm_config` | | | Raydium fee tier. Owner checked by the crate; pin the tier yourself (`pda::amm_config(index)`). |
 | `raydium_authority` | | | `pda::pool_authority()`; checked by Raydium. |
 | `lp_mint` | yes | | `pda::lp_mint(pool)`; created by Raydium. |
 | `base_vault` | yes | | `pda::vault(pool, mint)`; created by Raydium. |
@@ -157,6 +189,7 @@ by anyone (the crate copes either way).
 | `raydium_program` | | | `ids::CPMM_PROGRAM_ID`; checked by the crate. |
 
 For `LpLock::SendTo` also pass the LP owner and their LP ATA (writable).
+The owner must come from your program's state, not from the caller.
 
 ## Costs
 
@@ -187,7 +220,7 @@ The crate's errors start at 9000 so they never clash with your program's own
 | Code | Error | Usually means |
 |---|---|---|
 | 9000 | `InvalidAmmConfig` | The `AmmConfig` isn't owned by Raydium, or is too short. Wrong cluster? |
-| 9001 | `InvalidAccount` | A program ID, the wrapped-SOL mint, or the base mint's owner doesn't match. |
+| 9001 | `InvalidAccount` | A program ID, the wrapped-SOL mint, or the base mint's owner doesn't match, or the base mint isn't writable. |
 | 9002 | `ZeroAmount` | `sol_amount` or `token_amount` is 0. |
 | 9003 | `InsufficientSol` | `authority` holds less than `sol_amount`: `prepare` didn't run in this transaction, or already graduated. |
 | 9004 | `MathOverflow` | Should never happen; please open an issue. |
@@ -205,13 +238,21 @@ for the following:
   `prepare`/`graduate`. The crate can't know your state.
 - [ ] **Only when ready.** Check your own condition (curve sold out, deadline
   passed…) in both `prepare` and `graduate`.
+- [ ] **`prepare` only right before `graduate`.** Check the next instruction
+  with the instructions sysvar (step 3), so the SOL can't be moved and then
+  stranded.
+- [ ] **LP recipient from state.** With `LpLock::SendTo`, the owner is fixed
+  before graduation and checked; never taken from the caller.
 - [ ] **Tracked amounts.** `sol_amount` and `token_amount` come from your
   state, never from `lamports()` or a token balance.
 - [ ] **Dedicated authority.** The graduation authority holds nothing but
   the SOL for this pool. Everything else on it goes to the payer.
 - [ ] **Pinned addresses.** Pin every account in `#[derive(Accounts)]`: the
   seeds of your PDAs, `seeds::program = ids::CPMM_PROGRAM_ID` for Raydium's,
-  the program IDs, and **the fee tier you chose**.
+  the program IDs, and **the fee tier you chose** (step 6).
+- [ ] **Who creates a launch.** Seed launches so nobody can claim one for
+  someone else's mint at their own price. The example's `create_launch` is a
+  stand-in that doesn't do this; don't copy it.
 - [ ] **Pool PDA.** Use a PDA of your program as `pool_state`, never
   Raydium's default address, so nobody can create your pool first.
 - [ ] **Mint authority.** A launch mint normally has no mint authority (fixed
@@ -233,10 +274,13 @@ and by clippy.
 ## Limitations
 
 - **Quote mint is wrapped SOL only.** No USDC or other quote tokens yet.
-- **Token-2022 extensions.** Only plain Token-2022 mints are tested. Mints
-  with a transfer fee aren't supported: the authority would receive less
-  than `token_amount`, so Raydium's deposit would fail. Raydium also rejects
-  some extensions itself.
+- **Token-2022 extensions.** Tested: plain mints, and a transfer fee set to
+  0%. A **non-zero** transfer fee isn't supported: the authority receives
+  less than `token_amount`, so Raydium's deposit fails and the transaction
+  reverts. Whoever holds a mint's transfer-fee authority can raise the fee
+  later and so block graduation; launch mints shouldn't have one. Raydium
+  rejects other extensions (transfer hook, permanent delegate, frozen default
+  state…) itself.
 - **Creates pools only.** No swaps, adding or removing liquidity, or Raydium
   AMM v4 / CLMM.
 - **`prepare` is yours.** How your SOL gets to the authority depends on how
@@ -253,6 +297,7 @@ and by clippy.
 |---|---|
 | `exceeded CUs meter` / `Computational budget exceeded` | Add `SetComputeUnitLimit(400_000)` to the transaction. |
 | `9003 InsufficientSol` | Send `prepare` and `graduate` in the same transaction, in that order. |
+| Example's `GraduateMustFollow` | `prepare` must be immediately followed by `graduate`; a compute-budget instruction goes before `prepare`, not between. |
 | `9000 InvalidAmmConfig` on devnet | Build with `--features devnet` and pass a devnet fee tier. |
 | LiteSVM won't load your program | Build with `cargo build-sbf --arch v0`: Anchor 1.x defaults to SBPF v3, which LiteSVM's default runtime rejects. |
 | `anchor-spl: enable exactly one of the solana-v3 or solana-v4 features` | Add `features = [..., "solana-v3"]` to `anchor-spl` (1.2.1+) with `default-features = false`. |
@@ -262,7 +307,7 @@ and by clippy.
 | Item | What |
 |---|---|
 | `ids` | Raydium CPMM program ID, fee receiver, seeds, `initialize` discriminator. Mainnet by default; `devnet` feature for devnet. |
-| `pda` | `pool_authority()`, `lp_mint(pool)`, `vault(pool, mint)`, `observation(pool)`. |
+| `pda` | `amm_config(index)`, `pool_authority()`, `lp_mint(pool)`, `vault(pool, mint)`, `observation(pool)`. |
 | `create_pool_fee(&AccountInfo)` | Raydium's pool-creation fee from an `AmmConfig`, owner checked. |
 | `graduate(GraduateAccounts, GraduateParams)` | The whole flow above. |
 | `LpLock` | `Burn` (liquidity locked forever) or `SendTo { owner, token_account }`. |
@@ -293,7 +338,26 @@ and Token-2022 as deployed on mainnet ([fixtures](examples/launchpad/tests/fixtu
 - a rival pool at Raydium's default address doesn't block graduation, and
   nobody else can create a pool at ours;
 - graduating twice, graduating without `prepare`, and an `AmmConfig` not
-  owned by Raydium all fail.
+  owned by Raydium all fail;
+- regressions from the [security review](#security-review): the caller can't
+  choose the LP recipient, the fee tier is pinned, `prepare` only runs right
+  before `graduate` (and a failing graduation leaves the SOL in place), SOL
+  sent ahead of time to any address the graduation creates doesn't block it,
+  and a 0% transfer-fee mint graduates.
+
+## Security review
+
+An internal adversarial review (2026-10, not an audit) tried to break the
+crate and the example with LiteSVM proofs. It found nothing in the crate
+that lets anyone steal funds or block a graduation, and these issues, all
+fixed:
+
+| Severity | Issue | Fix |
+|---|---|---|
+| Critical | Example: any caller could name the LP recipient, take every LP token and withdraw the pool. | Recipient fixed at launch creation and checked; `SendTo` documented. |
+| Medium | Example: fee tier not pinned; the first caller chose it. | Pinned to tier 0 by seeds. |
+| Low | Example: `prepare` alone could strand the SOL if graduation then failed. | `prepare` requires `graduate` next. |
+| Low | Crate: didn't check the base mint is writable (a donated token could then block graduation). | Checked. |
 
 Requires Rust 1.89 (pinned), Solana CLI 4.1.x (`cargo build-sbf`). Build in
 WSL2 or Linux.

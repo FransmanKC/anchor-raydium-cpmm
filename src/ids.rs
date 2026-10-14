@@ -23,6 +23,8 @@ pub const CREATE_POOL_FEE_RECEIVER: Pubkey =
     pubkey!("3oE58BKVt8KuYkGxx8zBojugnymWmBiyafWgMrnb6eYy");
 
 pub const AUTH_SEED: &[u8] = b"vault_and_lp_mint_auth_seed";
+/// With the fee tier's index as a big-endian u16.
+pub const AMM_CONFIG_SEED: &[u8] = b"amm_config";
 pub const POOL_LP_MINT_SEED: &[u8] = b"pool_lp_mint";
 pub const POOL_VAULT_SEED: &[u8] = b"pool_vault";
 pub const OBSERVATION_SEED: &[u8] = b"observation";

@@ -8,6 +8,7 @@
 use anchor_lang::{
     prelude::*,
     system_program::{transfer, Transfer},
+    Discriminator,
 };
 use anchor_raydium_cpmm::{ids, GraduateAccounts, GraduateParams, LpLock};
 use anchor_spl::{
@@ -15,6 +16,7 @@ use anchor_spl::{
     token::{spl_token::native_mint, Token},
     token_interface::{self, Mint, TokenAccount, TokenInterface},
 };
+use solana_instructions_sysvar::{load_current_index_checked, load_instruction_at_checked};
 
 declare_id!("EBLM5gfpUpxDnei7B9Hggqp8K8MNMDbiwKhrYhad9Qf5");
 
@@ -23,23 +25,33 @@ pub const LAUNCH_SEED: &[u8] = b"launch";
 pub const GRADUATION_SEED: &[u8] = b"graduation";
 /// PDA used as the pool address, so nobody can create the pool first.
 pub const POOL_SEED: &[u8] = b"pool";
+/// Raydium fee tier every pool uses (0: 0.25% trade fee). Pinned, or the
+/// first caller would choose it, forever.
+pub const FEE_TIER: u16 = 0;
 
 #[program]
 pub mod launchpad {
     use super::*;
 
     /// Records a launch ready to graduate, funded by the creator. A real
-    /// launchpad gets here by selling out its curve.
+    /// launchpad gets here by selling out its curve. Stand-in only: anyone
+    /// holding the mint's tokens could claim its launch first, at their own
+    /// price. Don't copy it.
+    ///
+    /// `lp_recipient`: who gets the LP tokens; `None` burns them. Fixed here,
+    /// never chosen by whoever calls `graduate`.
     pub fn create_launch(
         ctx: Context<CreateLaunch>,
         sol_amount: u64,
         token_amount: u64,
+        lp_recipient: Option<Pubkey>,
     ) -> Result<()> {
         let a = &mut *ctx.accounts;
         a.launch.set_inner(Launch {
             mint: a.mint.key(),
             sol_amount,
             token_amount,
+            lp_recipient,
             prepared: false,
             pool: None,
             bump: ctx.bumps.launch,
@@ -73,7 +85,19 @@ pub mod launchpad {
     /// can only be moved directly, and Solana rejects a direct move followed
     /// by a CPI that doesn't include both accounts. Doing it in its own
     /// instruction lets `graduate` use ordinary CPIs throughout.
+    ///
+    /// The next instruction must be `graduate`, so the transaction either
+    /// graduates or reverts; nobody can move the SOL and leave it stranded.
     pub fn prepare(ctx: Context<Prepare>) -> Result<()> {
+        let ixs = ctx.accounts.instructions.to_account_info();
+        let next = load_current_index_checked(&ixs)?
+            .checked_add(1)
+            .and_then(|i| load_instruction_at_checked(i.into(), &ixs).ok());
+        require!(
+            next.is_some_and(|ix| ix.program_id == crate::ID
+                && ix.data.starts_with(instruction::Graduate::DISCRIMINATOR)),
+            LaunchpadError::GraduateMustFollow
+        );
         let launch = &mut ctx.accounts.launch;
         require!(launch.pool.is_none(), LaunchpadError::AlreadyGraduated);
         require!(!launch.prepared, LaunchpadError::AlreadyPrepared);
@@ -85,8 +109,8 @@ pub mod launchpad {
     }
 
     /// Step 2 of graduation: permissionless. The payer fronts Raydium's
-    /// fee and gets back what isn't spent. Burns the LP tokens, unless
-    /// both LP recipient accounts are given.
+    /// fee and gets back what isn't spent. Burns the LP tokens, or sends
+    /// them to the recipient fixed at `create_launch`.
     pub fn graduate(ctx: Context<Graduate>) -> Result<()> {
         let a = &mut *ctx.accounts;
         require!(a.launch.pool.is_none(), LaunchpadError::AlreadyGraduated);
@@ -100,12 +124,15 @@ pub mod launchpad {
         ];
         let pool_seeds: &[&[u8]] = &[POOL_SEED, mint_key.as_ref(), &[ctx.bumps.pool_state]];
         let launch_seeds: &[&[u8]] = &[LAUNCH_SEED, mint_key.as_ref(), &[a.launch.bump]];
-        let lp_lock = match (&a.lp_recipient, &a.lp_recipient_token_account) {
-            (Some(owner), Some(token_account)) => LpLock::SendTo {
-                owner: owner.to_account_info(),
-                token_account: token_account.to_account_info(),
+        let lp_lock = match a.launch.lp_recipient {
+            None => LpLock::Burn,
+            Some(recipient) => match (&a.lp_recipient, &a.lp_recipient_token_account) {
+                (Some(owner), Some(token_account)) if owner.key() == recipient => LpLock::SendTo {
+                    owner: owner.to_account_info(),
+                    token_account: token_account.to_account_info(),
+                },
+                _ => return err!(LaunchpadError::WrongLpRecipient),
             },
-            _ => LpLock::Burn,
         };
 
         let outcome = anchor_raydium_cpmm::graduate(
@@ -161,6 +188,8 @@ pub struct Launch {
     /// Tracked amounts: the pool gets exactly these, whatever the balances.
     pub sol_amount: u64,
     pub token_amount: u64,
+    /// Gets the LP tokens; `None` burns them.
+    pub lp_recipient: Option<Pubkey>,
     pub prepared: bool,
     pub pool: Option<Pubkey>,
     pub bump: u8,
@@ -174,6 +203,10 @@ pub enum LaunchpadError {
     AlreadyPrepared,
     #[msg("Run prepare first, in the same transaction")]
     NotPrepared,
+    #[msg("prepare must be followed by graduate")]
+    GraduateMustFollow,
+    #[msg("LP recipient accounts don't match the launch")]
+    WrongLpRecipient,
 }
 
 #[derive(Accounts)]
@@ -210,6 +243,9 @@ pub struct Prepare<'info> {
     pub launch: Account<'info, Launch>,
     #[account(mut, seeds = [GRADUATION_SEED, launch.mint.as_ref()], bump)]
     pub graduation_authority: SystemAccount<'info>,
+    /// CHECK: the instructions sysvar, to check `graduate` comes next.
+    #[account(address = solana_instructions_sysvar::ID)]
+    pub instructions: UncheckedAccount<'info>,
 }
 
 /// The constraints a real program should copy: every address is pinned, so
@@ -265,8 +301,12 @@ pub struct Graduate<'info> {
     /// CHECK: fixed program ID, so this program never CPIs anywhere else.
     #[account(address = ids::CPMM_PROGRAM_ID, executable)]
     pub raydium_program: UncheckedAccount<'info>,
-    /// CHECK: any Raydium fee tier; the crate checks its owner. A real
-    /// launchpad would pin the one it chose.
+    /// CHECK: Raydium's fee tier FEE_TIER, pinned.
+    #[account(
+        seeds = [ids::AMM_CONFIG_SEED, &FEE_TIER.to_be_bytes()],
+        bump,
+        seeds::program = ids::CPMM_PROGRAM_ID,
+    )]
     pub amm_config: UncheckedAccount<'info>,
     /// CHECK: Raydium's vault and LP-mint authority.
     #[account(seeds = [ids::AUTH_SEED], bump, seeds::program = ids::CPMM_PROGRAM_ID)]
@@ -308,7 +348,7 @@ pub struct Graduate<'info> {
     pub create_pool_fee_receiver: UncheckedAccount<'info>,
     #[account(address = native_mint::ID)]
     pub wsol_mint: Box<InterfaceAccount<'info, Mint>>,
-    /// CHECK: receives the LP tokens instead of burning them (optional).
+    /// CHECK: must be `launch.lp_recipient` when set; checked in `graduate`.
     pub lp_recipient: Option<UncheckedAccount<'info>>,
     /// CHECK: `lp_recipient`'s LP token account; the ATA program checks the
     /// address when creating it.
