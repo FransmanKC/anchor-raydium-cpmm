@@ -6,6 +6,9 @@
 //! burns (or delivers) the LP tokens, and cleans up after itself. See the
 //! README for the two-instruction flow and `examples/launchpad` for a full
 //! program.
+//!
+//! **Status: educational.** Not audited and not yet meant for mainnet. Build
+//! and test with it on devnet or localnet, and review it yourself first.
 
 use anchor_lang::{
     prelude::*,

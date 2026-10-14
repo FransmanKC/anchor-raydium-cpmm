@@ -3,11 +3,27 @@
 Graduate a token from an Anchor program into a Raydium CPMM pool and lock the
 liquidity: the step every bonding-curve launchpad ends with.
 
+> [!WARNING]
+> **For learning and experimenting, not for mainnet (yet).** This crate is
+> young, has not been audited, and is not published on crates.io. Use it to
+> study how a safe graduation works, and to build and test on devnet or
+> localnet. Don't put real users' funds behind it on mainnet. If you do so
+> anyway, that's your own risk, after your own review and audit. The licences
+> come with no warranty.
+
 ```toml
 [dependencies]
-anchor-raydium-cpmm = { git = "https://github.com/KevinGod1234/anchor-raydium-cpmm" }
-# devnet: features = ["devnet"]
+# Pin a commit: the API can change without notice before 1.0.
+anchor-raydium-cpmm = { git = "https://github.com/KevinGod1234/anchor-raydium-cpmm", rev = "<commit>" }
+# devnet addresses: add  features = ["devnet"]
 ```
+
+**Contents:** [Why](#why) · [How it works](#how-it-works) ·
+[Integration guide](#integration-guide) · [Accounts](#accounts) ·
+[Costs](#costs) · [Errors](#errors) · [Security checklist](#security-checklist) ·
+[Devnet](#devnet) · [Limitations](#limitations) ·
+[Troubleshooting](#troubleshooting) · [API](#api) · [Tests](#tests) ·
+[Alternatives](#alternatives)
 
 Anchor 1.2, Solana 3.x crates, SPL Token or Token-2022 base mints, quote mint
 wrapped SOL. Tested with LiteSVM against Raydium's real mainnet program.
@@ -96,8 +112,9 @@ let outcome = anchor_raydium_cpmm::graduate(
 launch.pool = Some(outcome.pool); // and refuse to graduate again
 ```
 
-**5. Send both in one transaction** with a compute budget: graduation uses
-about 190k to 240k compute units (measured; more than the 200k default).
+**5. Send both in one transaction** with a compute budget. Prepare plus
+graduate measured 197k to 258k compute units (it varies with the PDA bump
+searches), more than the 200k default.
 
 ```
 [ ComputeBudget::SetComputeUnitLimit(400_000), prepare, graduate ]
@@ -106,6 +123,139 @@ about 190k to 240k compute units (measured; more than the 200k default).
 **6. Pin the fee tier.** The crate checks the `AmmConfig` is Raydium's; your
 program should also pin *which* tier it uses (the example accepts any, to
 stay short).
+
+## Accounts
+
+The 23 fields of `GraduateAccounts`, in the order the example declares them.
+"Created by" means the account must not exist yet, or may have been created
+by anyone (the crate copes either way).
+
+| Field | Writable | Signer | What / who checks it |
+|---|---|---|---|
+| `payer` | yes | yes (tx) | Fronts the fee and rent; gets the unspent part back. |
+| `authority` | yes | PDA | System-owned PDA of your program; must already hold `sol_amount`. Signs as pool creator. |
+| `base_mint` | yes | | The token. Owner must be `base_token_program` (crate). Writable to burn stray tokens. |
+| `token_source` | yes | | Your vault holding the tokens. |
+| `token_source_authority` | | PDA or tx | Owner of `token_source`. |
+| `authority_base_account` | yes | | `authority`'s ATA for the mint. Created and closed here (address checked by the ATA program). |
+| `authority_wsol_account` | yes | | `authority`'s wrapped-SOL ATA. Created and closed here. |
+| `authority_lp_account` | yes | | `authority`'s LP ATA. Raydium creates it; closed here. |
+| `pool_state` | yes | PDA | Your pool PDA. Raydium creates it; only your program can sign for it. |
+| `amm_config` | | | Raydium fee tier. Owner checked by the crate; pin the tier yourself. |
+| `raydium_authority` | | | `pda::pool_authority()`; checked by Raydium. |
+| `lp_mint` | yes | | `pda::lp_mint(pool)`; created by Raydium. |
+| `base_vault` | yes | | `pda::vault(pool, mint)`; created by Raydium. |
+| `wsol_vault` | yes | | `pda::vault(pool, WSOL)`; created by Raydium. |
+| `observation_state` | yes | | `pda::observation(pool)`; created by Raydium. |
+| `create_pool_fee_receiver` | yes | | `ids::CREATE_POOL_FEE_RECEIVER`; checked by Raydium. |
+| `wsol_mint` | | | `So111…112`; checked by the crate. |
+| `token_program` | | | SPL Token (wrapped SOL and LP mint); checked by the crate. |
+| `base_token_program` | | | SPL Token or Token-2022; checked by the crate. |
+| `associated_token_program` | | | Associated Token Account program. |
+| `system_program` | | | System program. |
+| `rent` | | | Rent sysvar (Raydium still asks for it). |
+| `raydium_program` | | | `ids::CPMM_PROGRAM_ID`; checked by the crate. |
+
+For `LpLock::SendTo` also pass the LP owner and their LP ATA (writable).
+
+## Costs
+
+Measured in the tests on mainnet fee tier 0 (`D4FPEr…BvC2`):
+
+| | Lamports | SOL |
+|---|---|---|
+| Raydium pool-creation fee | 150,000,000 | 0.15 |
+| Rent of pool state, LP mint, vaults, observation | 40,117,440 | ~0.040 |
+| **Total `cost` with `LpLock::Burn`** | **190,117,440** | **~0.190** |
+| Plus the LP recipient's ATA, with `SendTo` | +2,039,280 | ~0.002 |
+
+The payer needs `create_pool_fee + RENT_ALLOWANCE` (0.25 SOL on tier 0) plus
+the transaction fee available up front; about 0.06 SOL comes back within the
+same instruction. The temporary token accounts' rent is refunded when they're
+closed. Raydium can change its fees: the crate reads the fee from the
+`AmmConfig` at runtime, so nothing is hard-coded.
+
+Who pays in the end is up to you: the example has the caller pay, and riff
+reimbursed the caller from protocol fees. `GraduateOutcome::cost` tells you
+the amount.
+
+## Errors
+
+The crate's errors start at 9000 so they never clash with your program's own
+(Anchor starts those at 6000).
+
+| Code | Error | Usually means |
+|---|---|---|
+| 9000 | `InvalidAmmConfig` | The `AmmConfig` isn't owned by Raydium, or is too short. Wrong cluster? |
+| 9001 | `InvalidAccount` | A program ID, the wrapped-SOL mint, or the base mint's owner doesn't match. |
+| 9002 | `ZeroAmount` | `sol_amount` or `token_amount` is 0. |
+| 9003 | `InsufficientSol` | `authority` holds less than `sol_amount`: `prepare` didn't run in this transaction, or already graduated. |
+| 9004 | `MathOverflow` | Should never happen; please open an issue. |
+
+Errors from Raydium (`CPMMoo8…`), the token programs or the ATA program are
+passed through unchanged. Check the transaction logs for which program
+failed.
+
+## Security checklist
+
+The crate handles the graduation itself. Your program is still responsible
+for the following:
+
+- [ ] **Graduate once.** Record the pool (or a flag) and refuse a second
+  `prepare`/`graduate`. The crate can't know your state.
+- [ ] **Only when ready.** Check your own condition (curve sold out, deadline
+  passed…) in both `prepare` and `graduate`.
+- [ ] **Tracked amounts.** `sol_amount` and `token_amount` come from your
+  state, never from `lamports()` or a token balance.
+- [ ] **Dedicated authority.** The graduation authority holds nothing but
+  the SOL for this pool. Everything else on it goes to the payer.
+- [ ] **Pinned addresses.** Pin every account in `#[derive(Accounts)]`: the
+  seeds of your PDAs, `seeds::program = ids::CPMM_PROGRAM_ID` for Raydium's,
+  the program IDs, and **the fee tier you chose**.
+- [ ] **Pool PDA.** Use a PDA of your program as `pool_state`, never
+  Raydium's default address, so nobody can create your pool first.
+- [ ] **Mint authority.** A launch mint normally has no mint authority (fixed
+  supply) and no freeze authority. With a freeze authority, whoever holds it
+  can freeze the pool's vault.
+- [ ] **Open time.** `open_time: 0` opens trading immediately. Set a future
+  time if you want a delay.
+- [ ] **Review and audit** before any mainnet use (see the warning above).
+
+## Devnet
+
+Build with `features = ["devnet"]` to use Raydium's devnet program
+(`DRaycp…pYb`) and fee receiver. Use a **devnet** `AmmConfig`. Mainnet fee
+tiers don't exist on devnet, and the crate rejects an `AmmConfig` that isn't
+owned by the program it was built for. The tests run against mainnet
+snapshots only; the devnet build is checked by a unit test of its addresses
+and by clippy.
+
+## Limitations
+
+- **Quote mint is wrapped SOL only.** No USDC or other quote tokens yet.
+- **Token-2022 extensions.** Only plain Token-2022 mints are tested. Mints
+  with a transfer fee aren't supported: the authority would receive less
+  than `token_amount`, so Raydium's deposit would fail. Raydium also rejects
+  some extensions itself.
+- **Creates pools only.** No swaps, adding or removing liquidity, or Raydium
+  AMM v4 / CLMM.
+- **`prepare` is yours.** How your SOL gets to the authority depends on how
+  you store it, so the crate leaves it to you (see step 3 above).
+- **Burn is final.** `LpLock::Burn` locks the liquidity forever. Nobody can
+  withdraw it, and Raydium's LP fee-claim lockers don't apply.
+- **Fixtures age.** Raydium and the token programs can be upgraded. Refresh
+  the [fixtures](examples/launchpad/tests/fixtures) and re-run the tests
+  before relying on them.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `exceeded CUs meter` / `Computational budget exceeded` | Add `SetComputeUnitLimit(400_000)` to the transaction. |
+| `9003 InsufficientSol` | Send `prepare` and `graduate` in the same transaction, in that order. |
+| `9000 InvalidAmmConfig` on devnet | Build with `--features devnet` and pass a devnet fee tier. |
+| LiteSVM won't load your program | Build with `cargo build-sbf --arch v0`: Anchor 1.x defaults to SBPF v3, which LiteSVM's default runtime rejects. |
+| `anchor-spl: enable exactly one of the solana-v3 or solana-v4 features` | Add `features = [..., "solana-v3"]` to `anchor-spl` (1.2.1+) with `default-features = false`. |
 
 ## API
 
@@ -174,4 +324,5 @@ runs on devnet. Dual-licensed under [MIT](LICENSE-MIT) or
 test fixtures is Apache-2.0, Copyright Raydium; see its
 [licence](examples/launchpad/tests/fixtures/LICENSE-raydium-cp-swap).
 
-Not audited. Review it and test against your own program before mainnet.
+**Educational use.** Not audited and not on crates.io. Review it, test it
+against your own program, and get an audit before mainnet.

@@ -190,7 +190,6 @@ fn graduate(l: &mut Launch, payer: &Keypair, lp_recipient: Option<Pubkey>) -> Tr
 /// Checks everything a graduation promises and returns the LP amount.
 fn assert_graduated(l: &Launch, meta: &TransactionMetadata, payer_spent: u64) -> u64 {
     let (pool, auth) = (pool(l), authority(l));
-    println!("graduate: {} CU", meta.compute_units_consumed);
     assert!(meta.compute_units_consumed < 400_000);
 
     // The pool is ours, and opens at exactly sol_amount / token_amount.
@@ -219,6 +218,10 @@ fn assert_graduated(l: &Launch, meta: &TransactionMetadata, payer_spent: u64) ->
 
     // The payer paid Raydium's fee plus rent, and got the rest back.
     let (lp_amount, cost) = parse_outcome(&meta.logs);
+    println!(
+        "graduate: {} CU, cost {cost} lamports",
+        meta.compute_units_consumed
+    );
     assert_eq!(payer_spent, cost + TX_FEE);
     assert!(cost > POOL_CREATION_FEE && cost < POOL_CREATION_FEE + RENT_ALLOWANCE);
     assert!(lp_amount > 0);
