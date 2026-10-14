@@ -2,7 +2,7 @@
 # default runtime. (Anchor 1.x defaults to v3, which LiteSVM rejects.)
 ARCH ?= v0
 
-.PHONY: build test lint fmt
+.PHONY: build test lint fmt ci
 
 # The example program the integration tests run against.
 build:
@@ -17,3 +17,9 @@ lint:
 
 fmt:
 	cargo fmt --all
+
+# Same checks as .github/workflows/ci.yml, run locally.
+ci: test lint
+	cargo fmt --all --check
+	cargo clippy --workspace --all-targets --features anchor-raydium-cpmm/devnet -- -D warnings
+	cargo audit

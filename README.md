@@ -128,6 +128,7 @@ the Associated Token program checks the temporary account addresses.
 ```bash
 make test   # builds the example for SBPF v0, runs every test (mainnet + devnet IDs)
 make lint   # clippy -D warnings
+make ci     # everything CI runs (fmt, test, clippy, cargo-audit), locally
 ```
 
 `examples/launchpad/tests/graduation.rs` runs against Raydium CPMM, SPL Token
