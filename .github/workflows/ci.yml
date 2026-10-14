@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Each download is pinned to a SHA-256 hash; update both together.
+  SOLANA_VERSION: 4.1.2
+  SOLANA_SHA256: 5991d027a686eb419a709a479178b33eb83501e8a2bfbf599a81a286bfcbf770
+
+jobs:
+  test:
+    name: Build, test, clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust (version from rust-toolchain.toml)
+        run: rustup toolchain install && rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Cache Solana CLI and SBF platform tools
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.local/share/solana
+            ~/.cache/solana
+          key: solana-${{ runner.os }}-${{ env.SOLANA_VERSION }}
+
+      - name: Install Solana CLI
+        run: |
+          dir="$HOME/.local/share/solana/install/active_release"
+          if [ ! -x "$dir/bin/cargo-build-sbf" ]; then
+            curl -sSfL -o /tmp/solana.tar.bz2 \
+              "https://github.com/anza-xyz/agave/releases/download/v${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2"
+            echo "${SOLANA_SHA256}  /tmp/solana.tar.bz2" | sha256sum -c -
+            mkdir -p "$(dirname "$dir")"
+            tar -xjf /tmp/solana.tar.bz2 -C "$(dirname "$dir")"
+            mv "$(dirname "$dir")/solana-release" "$dir"
+          fi
+          echo "$dir/bin" >> "$GITHUB_PATH"
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Build and test (SBPF v0, mainnet and devnet addresses)
+        run: make test
+
+      - name: Clippy
+        run: make lint && cargo clippy --workspace --all-targets --features anchor-raydium-cpmm/devnet -- -D warnings
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2.87.20
+        with:
+          tool: cargo-audit@0.22.2
+
+      # Fails on known vulnerabilities; unmaintained/unsound warnings are
+      # reported but don't fail the build.
+      - name: Audit dependencies
+        run: cargo audit

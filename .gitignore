@@ -1,0 +1,6 @@
+target
+.anchor
+**/*.rs.bk
+.DS_Store
+PLAN.md
+CLAUDE.md
