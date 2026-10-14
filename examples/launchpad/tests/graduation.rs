@@ -16,7 +16,7 @@ use {
         token::{spl_token::native_mint, ID as TOKEN_ID},
         token_2022::{
             spl_token_2022::{
-                extension::StateWithExtensions,
+                extension::{ExtensionType, StateWithExtensions},
                 state::{Account as TokenAccount, AccountState, Mint},
             },
             ID as TOKEN_2022_ID,
@@ -24,7 +24,7 @@ use {
     },
     launchpad::{LaunchpadError, GRADUATION_SEED, LAUNCH_SEED, POOL_SEED},
     litesvm::{
-        types::{TransactionMetadata, TransactionResult},
+        types::{FailedTransactionMetadata, TransactionMetadata, TransactionResult},
         LiteSVM,
     },
     solana_keypair::Keypair,
@@ -44,6 +44,8 @@ const TX_FEE: u64 = 5_000;
 const COMPUTE_BUDGET: Pubkey =
     Pubkey::from_str_const("ComputeBudget111111111111111111111111111111");
 const RENT_SYSVAR: Pubkey = Pubkey::from_str_const("SysvarRent111111111111111111111111111111111");
+/// Test-only attacker program (tests/forwarder): forwards one instruction.
+const FORWARDER: Pubkey = Pubkey::from_str_const("Forwarder1111111111111111111111111111111111");
 const INSTRUCTIONS_SYSVAR: Pubkey =
     Pubkey::from_str_const("Sysvar1nstructions1111111111111111111111111");
 
@@ -81,13 +83,36 @@ fn launch_with(
     lp_recipient: Option<Pubkey>,
     setup_mint: &dyn Fn(&mut LiteSVM, Pubkey),
 ) -> Launch {
+    let amounts = (SOL_AMOUNT, TOKEN_AMOUNT);
+    try_launch(
+        base_program,
+        base_before_wsol,
+        lp_recipient,
+        amounts,
+        setup_mint,
+    )
+    .unwrap()
+}
+
+/// Like [`launch_with`], with custom (sol, token) amounts; returns the
+/// `create_launch` error if it fails.
+#[allow(clippy::result_large_err)]
+fn try_launch(
+    base_program: Pubkey,
+    base_before_wsol: bool,
+    lp_recipient: Option<Pubkey>,
+    (sol_amount, token_amount): (u64, u64),
+    setup_mint: &dyn Fn(&mut LiteSVM, Pubkey),
+) -> Result<Launch, FailedTransactionMetadata> {
     let mut svm = LiteSVM::new();
-    let so = std::fs::read(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../target/deploy/launchpad.so"
-    ))
-    .expect("launchpad.so is missing: run `make build` first");
-    svm.add_program(launchpad::ID, &so).unwrap();
+    for (id, name) in [(launchpad::ID, "launchpad"), (FORWARDER, "forwarder")] {
+        let path = format!(
+            "{}/../../target/deploy/{name}.so",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let so = std::fs::read(path).expect("programs missing: run `make build` first");
+        svm.add_program(id, &so).unwrap();
+    }
     load_fixtures(&mut svm);
 
     let mint = loop {
@@ -105,35 +130,88 @@ fn launch_with(
         mint,
         creator.pubkey(),
         base_program,
-        TOKEN_AMOUNT,
+        token_amount,
     );
 
-    let ix = Instruction::new_with_bytes(
+    let ix = create_launch_ix(
+        &creator.pubkey(),
+        &mint,
+        base_program,
+        lp_recipient,
+        (sol_amount, token_amount),
+    );
+    send(&mut svm, &[ix], &[&creator])?;
+    Ok(Launch {
+        svm,
+        mint,
+        base_program,
+    })
+}
+
+fn create_launch_ix(
+    creator: &Pubkey,
+    mint: &Pubkey,
+    base_program: Pubkey,
+    lp_recipient: Option<Pubkey>,
+    (sol_amount, token_amount): (u64, u64),
+) -> Instruction {
+    let launch = pda(LAUNCH_SEED, mint);
+    Instruction::new_with_bytes(
         launchpad::ID,
         &launchpad::instruction::CreateLaunch {
-            sol_amount: SOL_AMOUNT,
-            token_amount: TOKEN_AMOUNT,
+            sol_amount,
+            token_amount,
             lp_recipient,
         }
         .data(),
         launchpad::accounts::CreateLaunch {
-            creator: creator.pubkey(),
-            mint,
-            launch: pda(LAUNCH_SEED, &mint),
-            vault: ata(&pda(LAUNCH_SEED, &mint), &mint, &base_program),
-            creator_token_account: creator_tokens,
+            creator: *creator,
+            mint: *mint,
+            launch,
+            vault: ata(&launch, mint, &base_program),
+            creator_token_account: ata(creator, mint, &base_program),
             token_program: base_program,
             associated_token_program: associated_token::ID,
             system_program: system_program::ID,
         }
         .to_account_metas(None),
-    );
-    send(&mut svm, &[ix], &[&creator]).unwrap();
-    Launch {
-        svm,
+    )
+}
+
+/// A second launch (SPL Token, mint sorting after wrapped SOL) in `l`'s VM,
+/// with `lp_recipient` computed from its mint. Returns the mint, or the
+/// `create_launch` error.
+#[allow(clippy::result_large_err)]
+fn add_launch(
+    l: &mut Launch,
+    lp_recipient: impl Fn(&Pubkey) -> Option<Pubkey>,
+) -> Result<Pubkey, FailedTransactionMetadata> {
+    let creator = funded(&mut l.svm);
+    let mint = loop {
+        let k = Keypair::new().pubkey();
+        if k > native_mint::ID {
+            break k;
+        }
+    };
+    set_mint(&mut l.svm, mint, TOKEN_ID, TOKEN_AMOUNT);
+    let tokens = ata(&creator.pubkey(), &mint, &TOKEN_ID);
+    set_token_account(
+        &mut l.svm,
+        tokens,
         mint,
-        base_program,
-    }
+        creator.pubkey(),
+        TOKEN_ID,
+        TOKEN_AMOUNT,
+    );
+    let ix = create_launch_ix(
+        &creator.pubkey(),
+        &mint,
+        TOKEN_ID,
+        lp_recipient(&mint),
+        (SOL_AMOUNT, TOKEN_AMOUNT),
+    );
+    send(&mut l.svm, &[ix], &[&creator])?;
+    Ok(mint)
 }
 
 fn prepare_ix(l: &Launch) -> Instruction {
@@ -644,6 +722,184 @@ fn raydium_initialize_ix(
     )
 }
 
+/// Was low (second review): an attacker's program could CPI `prepare` for
+/// someone else's launch, then end the transaction with a `graduate` of its
+/// own launch. The victim's SOL moved and could be stranded.
+#[test]
+fn prepare_cannot_be_called_through_another_program() {
+    let must_follow = u32::from(LaunchpadError::GraduateMustFollow);
+    let mut l = launch(TOKEN_ID, true);
+    let attacker = funded(&mut l.svm);
+    let prepare = prepare_ix(&l);
+    let mut forward = Instruction::new_with_bytes(FORWARDER, &prepare.data, vec![]);
+    forward
+        .accounts
+        .push(AccountMeta::new_readonly(launchpad::ID, false));
+    forward.accounts.extend(prepare.accounts);
+    let ixs = [
+        compute_budget_ix(1_400_000),
+        forward,
+        graduate_ix(&l, &attacker.pubkey(), None),
+    ];
+    assert_error(send(&mut l.svm, &ixs, &[&attacker]), must_follow);
+}
+
+/// `prepare` for one launch followed by `graduate` of another is refused.
+#[test]
+fn prepare_requires_graduate_of_the_same_launch() {
+    let mut a = launch(TOKEN_ID, true);
+    let b = Launch {
+        mint: add_launch(&mut a, |_| None).unwrap(),
+        svm: LiteSVM::new(),
+        base_program: TOKEN_ID,
+    };
+    let payer = funded(&mut a.svm);
+    let ixs = [
+        compute_budget_ix(1_400_000),
+        prepare_ix(&b),
+        graduate_ix(&a, &payer.pubkey(), None),
+    ];
+    let res = send(&mut a.svm, &ixs, &[&payer]);
+    assert_error(res, u32::from(LaunchpadError::GraduateMustFollow));
+}
+
+/// Our own PDAs as LP recipient would make graduation impossible (the
+/// authority can't close an LP account that holds the LP).
+#[test]
+fn own_pdas_are_refused_as_lp_recipient() {
+    let mut l = launch(TOKEN_ID, true);
+    for seed in [GRADUATION_SEED, POOL_SEED, LAUNCH_SEED] {
+        let res = add_launch(&mut l, |mint| Some(pda(seed, mint)));
+        assert_error(
+            res.map(|_| unreachable!()),
+            u32::from(LaunchpadError::WrongLpRecipient),
+        );
+    }
+}
+
+/// Raydium records our authority as the pool creator but leaves creator
+/// fees off, so no fees pile up on the PDA.
+#[test]
+fn creator_fees_are_off() {
+    let mut l = launch(TOKEN_ID, true);
+    let payer = funded(&mut l.svm);
+    graduate(&mut l, &payer, None).unwrap();
+    let d = l.svm.get_account(&pool(&l)).unwrap().data;
+    assert_eq!(&d[8..40], AMM_CONFIG.as_ref());
+    assert_eq!(&d[40..72], authority(&l).as_ref(), "pool_creator");
+    // PoolState (packed): 8 + 10*32 + 5*u8 + 7*u64; 390 is enable_creator_fee.
+    assert_eq!(d[390], 0, "enable_creator_fee");
+    assert_eq!(&d[397..413], &[0u8; 16], "creator fees 0 and 1");
+}
+
+/// Raydium locks 100 LP: sqrt(sol * tokens) <= 100 can never graduate (the
+/// transaction reverts, nothing moves), exactly 100 graduates with 0 LP.
+#[test]
+fn tiny_amounts_cannot_graduate() {
+    let tiny = |amount| {
+        try_launch(TOKEN_ID, true, None, (amount, amount), &move |svm, mint| {
+            set_mint(svm, mint, TOKEN_ID, amount)
+        })
+        .unwrap()
+    };
+    let mut l = tiny(99);
+    let payer = funded(&mut l.svm);
+    let err = graduate(&mut l, &payer, None).unwrap_err();
+    assert!(err.meta.logs.join("\n").contains("InitLpAmountTooLess"));
+    let mut l = tiny(100);
+    let payer = funded(&mut l.svm);
+    let meta = graduate(&mut l, &payer, None).unwrap();
+    assert_eq!(parse_outcome(&meta.logs).0, 0);
+}
+
+/// Which Token-2022 mint extensions Raydium accepts. Rejected ones make a
+/// launch impossible to graduate (the transaction reverts).
+#[test]
+fn token_2022_extensions_raydium_accepts() {
+    use ExtensionType as E;
+    let mut wrong = vec![];
+    for (ext, accepted) in [
+        (E::MetadataPointer, true),
+        (E::InterestBearingConfig, true),
+        (E::PermanentDelegate, false),
+        (E::MintCloseAuthority, false),
+        (E::TransferHook, false),
+        (E::DefaultAccountState, false),
+        (E::Pausable, false),
+    ] {
+        let mut l = launch_with(TOKEN_2022_ID, true, None, &|svm, k| {
+            set_ext_mint(svm, k, ext)
+        });
+        let payer = funded(&mut l.svm);
+        if graduate(&mut l, &payer, None).is_ok() != accepted {
+            wrong.push(ext);
+        }
+    }
+    assert!(wrong.is_empty(), "unexpected result for {wrong:?}");
+}
+
+/// Whoever holds the mint's freeze authority can block graduation: create
+/// the authority's token account (anyone can) and freeze it.
+#[test]
+fn freeze_authority_can_block_graduation() {
+    let freezer = Keypair::new();
+    let fa = freezer.pubkey();
+    let mut l = launch_with(TOKEN_ID, true, None, &move |svm, mint| {
+        set_mint(svm, mint, TOKEN_ID, TOKEN_AMOUNT);
+        let mut acc = svm.get_account(&mint).unwrap();
+        let mut m = Mint::unpack(&acc.data).unwrap();
+        m.freeze_authority = Some(fa).into();
+        m.pack_into_slice(&mut acc.data);
+        svm.set_account(mint, acc).unwrap();
+    });
+    l.svm.airdrop(&fa, SOL).unwrap();
+    let (auth, mint) = (authority(&l), l.mint);
+    let create = Instruction::new_with_bytes(
+        associated_token::ID,
+        &[1],
+        vec![
+            AccountMeta::new(fa, true),
+            AccountMeta::new(ata(&auth, &mint, &TOKEN_ID), false),
+            AccountMeta::new_readonly(auth, false),
+            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new_readonly(system_program::ID, false),
+            AccountMeta::new_readonly(TOKEN_ID, false),
+        ],
+    );
+    let freeze = Instruction::new_with_bytes(
+        TOKEN_ID,
+        &[10], // FreezeAccount
+        vec![
+            AccountMeta::new(ata(&auth, &mint, &TOKEN_ID), false),
+            AccountMeta::new_readonly(mint, false),
+            AccountMeta::new_readonly(fa, true),
+        ],
+    );
+    send(&mut l.svm, &[create, freeze], &[&freezer]).unwrap();
+    let payer = funded(&mut l.svm);
+    assert!(graduate(&mut l, &payer, None).is_err());
+}
+
+/// The largest transaction (SendTo, legacy, no lookup table) fits.
+#[test]
+fn send_to_transaction_fits() {
+    let recipient = Pubkey::new_unique();
+    let mut l = launch_with(TOKEN_2022_ID, false, Some(recipient), &|svm, mint| {
+        set_mint(svm, mint, TOKEN_2022_ID, TOKEN_AMOUNT)
+    });
+    let payer = funded(&mut l.svm);
+    let ixs = [
+        compute_budget_ix(400_000),
+        prepare_ix(&l),
+        graduate_ix(&l, &payer.pubkey(), Some(recipient)),
+    ];
+    let msg = Message::new_with_blockhash(&ixs, Some(&payer.pubkey()), &l.svm.latest_blockhash());
+    let size = 1 + 64 + msg.serialize().len();
+    println!("SendTo transaction: {size} of 1232 bytes");
+    assert!(size <= 1232);
+    send(&mut l.svm, &ixs, &[&payer]).unwrap();
+}
+
 // --- helpers ---------------------------------------------------------------
 
 /// Loads Raydium CPMM, the deployed token programs and the mainnet accounts
@@ -722,6 +978,63 @@ fn set_fee_mint(svm: &mut LiteSVM, key: Pubkey, bps: u16) {
     let ext = state.init_extension::<TransferFeeConfig>(true).unwrap();
     ext.older_transfer_fee = fee;
     ext.newer_transfer_fee = fee;
+    state.base = Mint {
+        supply: TOKEN_AMOUNT,
+        decimals: DECIMALS,
+        is_initialized: true,
+        ..Mint::default()
+    };
+    state.pack_base();
+    state.init_account_type().unwrap();
+    set(svm, key, TOKEN_2022_ID, data);
+}
+
+/// A Token-2022 mint with one extension, set so that it's otherwise
+/// harmless (no hook program, default state Initialized...).
+fn set_ext_mint(svm: &mut LiteSVM, key: Pubkey, ext: ExtensionType) {
+    use anchor_spl::token_2022::spl_token_2022::extension::{
+        default_account_state::DefaultAccountState, interest_bearing_mint::InterestBearingConfig,
+        metadata_pointer::MetadataPointer, mint_close_authority::MintCloseAuthority,
+        pausable::PausableConfig, permanent_delegate::PermanentDelegate,
+        transfer_hook::TransferHook, BaseStateWithExtensionsMut, StateWithExtensionsMut,
+    };
+    let len = ExtensionType::try_calculate_account_len::<Mint>(&[ext]).unwrap();
+    let mut data = vec![0; len];
+    let mut state = StateWithExtensionsMut::<Mint>::unpack_uninitialized(&mut data).unwrap();
+    let someone = Some(Pubkey::new_unique()).try_into().unwrap();
+    match ext {
+        ExtensionType::PermanentDelegate => {
+            state
+                .init_extension::<PermanentDelegate>(true)
+                .unwrap()
+                .delegate = someone;
+        }
+        ExtensionType::MintCloseAuthority => {
+            state
+                .init_extension::<MintCloseAuthority>(true)
+                .unwrap()
+                .close_authority = someone;
+        }
+        ExtensionType::TransferHook => {
+            state.init_extension::<TransferHook>(true).unwrap();
+        }
+        ExtensionType::DefaultAccountState => {
+            state
+                .init_extension::<DefaultAccountState>(true)
+                .unwrap()
+                .state = AccountState::Initialized as u8;
+        }
+        ExtensionType::Pausable => {
+            state.init_extension::<PausableConfig>(true).unwrap();
+        }
+        ExtensionType::MetadataPointer => {
+            state.init_extension::<MetadataPointer>(true).unwrap();
+        }
+        ExtensionType::InterestBearingConfig => {
+            state.init_extension::<InterestBearingConfig>(true).unwrap();
+        }
+        _ => unreachable!(),
+    }
     state.base = Mint {
         supply: TOKEN_AMOUNT,
         decimals: DECIMALS,

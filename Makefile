@@ -4,9 +4,11 @@ ARCH ?= v0
 
 .PHONY: build test lint fmt ci
 
-# The example program the integration tests run against.
+# The example program the integration tests run against, and a test-only
+# attacker program that calls it through a CPI.
 build:
 	cargo build-sbf --manifest-path examples/launchpad/Cargo.toml --arch $(ARCH) --sbf-out-dir target/deploy
+	cargo build-sbf --manifest-path examples/launchpad/tests/forwarder/Cargo.toml --arch $(ARCH) --sbf-out-dir target/deploy
 
 test: build
 	cargo test --workspace

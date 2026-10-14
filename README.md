@@ -83,18 +83,24 @@ state. Never compute them from `lamports()` or a token balance.
 **3. Write `prepare`**, a separate instruction that moves `sol_amount` from
 wherever your program keeps it to the graduation authority, and guards
 against running twice. It must **refuse to run unless the next instruction
-is your `graduate`**. Otherwise anyone can send `prepare` alone, and if
-graduation can't succeed afterwards the SOL is stuck on the authority. Check
-with the instructions sysvar (`solana-instructions-sysvar` crate):
+is your `graduate` for the same launch, and refuse to be called through
+another program** (under a CPI, "the next instruction" is the caller's).
+Otherwise anyone can move the SOL without graduating, and if graduation
+can't succeed afterwards the SOL is stuck on the authority. Check with the
+instructions sysvar (`solana-instructions-sysvar` crate):
 
 ```rust
 let ixs = ctx.accounts.instructions.to_account_info(); // Sysvar1nstructions…
 let next = load_current_index_checked(&ixs)?
     .checked_add(1)
     .and_then(|i| load_instruction_at_checked(i.into(), &ixs).ok());
+let launch_key = ctx.accounts.launch.key();
 require!(
-    next.is_some_and(|ix| ix.program_id == crate::ID
-        && ix.data.starts_with(instruction::Graduate::DISCRIMINATOR)),
+    get_stack_height() == TRANSACTION_LEVEL_STACK_HEIGHT
+        && next.is_some_and(|ix| ix.program_id == crate::ID
+            && ix.data.starts_with(instruction::Graduate::DISCRIMINATOR)
+            // the launch account's position in your Graduate accounts
+            && ix.accounts.get(1).is_some_and(|m| m.pubkey == launch_key)),
     MyError::GraduateMustFollow
 );
 ```
@@ -238,11 +244,18 @@ for the following:
   `prepare`/`graduate`. The crate can't know your state.
 - [ ] **Only when ready.** Check your own condition (curve sold out, deadline
   passed…) in both `prepare` and `graduate`.
-- [ ] **`prepare` only right before `graduate`.** Check the next instruction
-  with the instructions sysvar (step 3), so the SOL can't be moved and then
-  stranded.
+- [ ] **`prepare` only right before `graduate`.** Called directly (no CPI),
+  and the next instruction is `graduate` for the same launch (step 3), so the
+  SOL can't be moved and then stranded.
 - [ ] **LP recipient from state.** With `LpLock::SendTo`, the owner is fixed
-  before graduation and checked; never taken from the caller.
+  before graduation and checked; never taken from the caller. Refuse your
+  own PDAs as recipient: the authority can't close an LP account holding LP,
+  so graduation would never succeed.
+- [ ] **Check the launch can graduate when it's created.** Refuse amounts
+  with `sqrt(sol_amount × token_amount) <= 100` (Raydium locks 100 LP), and
+  Token-2022 mints with an extension Raydium rejects or a non-zero transfer
+  fee (see [Limitations](#limitations)). Otherwise the launch can never
+  graduate, and you need a way to give the funds back.
 - [ ] **Tracked amounts.** `sol_amount` and `token_amount` come from your
   state, never from `lamports()` or a token balance.
 - [ ] **Dedicated authority.** The graduation authority holds nothing but
@@ -256,10 +269,12 @@ for the following:
 - [ ] **Pool PDA.** Use a PDA of your program as `pool_state`, never
   Raydium's default address, so nobody can create your pool first.
 - [ ] **Mint authority.** A launch mint normally has no mint authority (fixed
-  supply) and no freeze authority. With a freeze authority, whoever holds it
-  can freeze the pool's vault.
-- [ ] **Open time.** `open_time: 0` opens trading immediately. Set a future
-  time if you want a delay.
+  supply) and no freeze authority. Whoever holds a freeze authority can
+  block graduation (by freezing the authority's token account, which anyone
+  can create early) and freeze the pool's vault later.
+- [ ] **Open time.** `open_time: 0` opens trading immediately. A future time
+  delays it; the crate passes it through unchecked, so cap it if it comes
+  from user input, or the pool may stay closed indefinitely.
 - [ ] **Review and audit** before any mainnet use (see the warning above).
 
 ## Devnet
@@ -274,13 +289,21 @@ and by clippy.
 ## Limitations
 
 - **Quote mint is wrapped SOL only.** No USDC or other quote tokens yet.
-- **Token-2022 extensions.** Tested: plain mints, and a transfer fee set to
-  0%. A **non-zero** transfer fee isn't supported: the authority receives
-  less than `token_amount`, so Raydium's deposit fails and the transaction
-  reverts. Whoever holds a mint's transfer-fee authority can raise the fee
-  later and so block graduation; launch mints shouldn't have one. Raydium
-  rejects other extensions (transfer hook, permanent delegate, frozen default
-  state…) itself.
+- **Token-2022 extensions.** Tested against the mainnet Raydium program:
+
+  | Graduates | Doesn't graduate (transaction reverts) |
+  |---|---|
+  | none, metadata pointer, interest-bearing, transfer fee at 0% | permanent delegate, mint close authority, transfer hook (even with no hook program), default account state (even `Initialized`), pausable, transfer fee above 0% |
+
+  A non-zero transfer fee fails because the authority receives less than
+  `token_amount`. Whoever holds a mint's transfer-fee authority can raise the
+  fee later and so block graduation; launch mints shouldn't have one.
+  Raydium accepts some otherwise-rejected mints from its own allowlist, but
+  only with extra accounts this crate doesn't pass, so those aren't
+  supported either.
+- **Minimum size.** Raydium locks 100 LP tokens, so
+  `sqrt(sol_amount × token_amount)` must be above 100. At exactly 100 the
+  pool is created with 0 LP for you.
 - **Creates pools only.** No swaps, adding or removing liquidity, or Raydium
   AMM v4 / CLMM.
 - **`prepare` is yours.** How your SOL gets to the authority depends on how
@@ -297,7 +320,7 @@ and by clippy.
 |---|---|
 | `exceeded CUs meter` / `Computational budget exceeded` | Add `SetComputeUnitLimit(400_000)` to the transaction. |
 | `9003 InsufficientSol` | Send `prepare` and `graduate` in the same transaction, in that order. |
-| Example's `GraduateMustFollow` | `prepare` must be immediately followed by `graduate`; a compute-budget instruction goes before `prepare`, not between. |
+| Example's `GraduateMustFollow` | `prepare` must be sent directly (not through another program) and immediately followed by `graduate` for the same launch; a compute-budget instruction goes before `prepare`, not between. |
 | `9000 InvalidAmmConfig` on devnet | Build with `--features devnet` and pass a devnet fee tier. |
 | LiteSVM won't load your program | Build with `cargo build-sbf --arch v0`: Anchor 1.x defaults to SBPF v3, which LiteSVM's default runtime rejects. |
 | `anchor-spl: enable exactly one of the solana-v3 or solana-v4 features` | Add `features = [..., "solana-v3"]` to `anchor-spl` (1.2.1+) with `default-features = false`. |
@@ -339,18 +362,23 @@ and Token-2022 as deployed on mainnet ([fixtures](examples/launchpad/tests/fixtu
   nobody else can create a pool at ours;
 - graduating twice, graduating without `prepare`, and an `AmmConfig` not
   owned by Raydium all fail;
-- regressions from the [security review](#security-review): the caller can't
-  choose the LP recipient, the fee tier is pinned, `prepare` only runs right
-  before `graduate` (and a failing graduation leaves the SOL in place), SOL
-  sent ahead of time to any address the graduation creates doesn't block it,
-  and a 0% transfer-fee mint graduates.
+- regressions from the [security reviews](#security-review): the caller can't
+  choose the LP recipient, and our own PDAs are refused as recipient; the fee
+  tier is pinned; `prepare` only runs directly and right before `graduate` of
+  the same launch (a test-only attacker program, `tests/forwarder`, tries it
+  through a CPI), and a failing graduation leaves the SOL in place; SOL sent
+  ahead of time to any address the graduation creates doesn't block it;
+- documented behaviour: which Token-2022 extensions Raydium accepts, the
+  minimum size, Raydium creator fees staying off, a freeze authority being
+  able to block graduation, and the largest transaction fitting in 1232
+  bytes.
 
 ## Security review
 
-An internal adversarial review (2026-10, not an audit) tried to break the
-crate and the example with LiteSVM proofs. It found nothing in the crate
-that lets anyone steal funds or block a graduation, and these issues, all
-fixed:
+Two internal adversarial reviews (2026-10, not an audit) tried to break the
+crate and the example with LiteSVM proofs. Neither found a way to steal
+funds or block a graduation through the crate itself. They found these
+issues, all fixed and covered by regression tests:
 
 | Severity | Issue | Fix |
 |---|---|---|
@@ -358,6 +386,13 @@ fixed:
 | Medium | Example: fee tier not pinned; the first caller chose it. | Pinned to tier 0 by seeds. |
 | Low | Example: `prepare` alone could strand the SOL if graduation then failed. | `prepare` requires `graduate` next. |
 | Low | Crate: didn't check the base mint is writable (a donated token could then block graduation). | Checked. |
+| Low | Example: `prepare` called through another program got past the check above, followed by a `graduate` of a different launch. | `prepare` must be called directly, followed by `graduate` of the same launch. |
+| Info | Example: the creator could name one of our PDAs as LP recipient, making graduation impossible. | Refused at `create_launch`. |
+| Info | Launches that can never graduate (tiny amounts, Token-2022 extensions Raydium rejects), freeze authority, unchecked `open_time`. | Documented in the [checklist](#security-checklist) and [Limitations](#limitations). |
+
+Checked and found safe: Raydium creator fees stay off for these pools, so
+nothing accrues to the authority; the program's PDAs can't be made to sign
+anything else; the LP recipient's token account can't be substituted.
 
 Requires Rust 1.89 (pinned), Solana CLI 4.1.x (`cargo build-sbf`). Build in
 WSL2 or Linux.

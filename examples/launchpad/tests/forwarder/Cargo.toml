@@ -1,0 +1,21 @@
+[package]
+name = "forwarder"
+version = "0.0.0"
+description = "Test only: an attacker's program that forwards one instruction as a CPI"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+# Checked by the entrypoint! macro.
+[features]
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = "1.2.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

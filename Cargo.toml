@@ -22,7 +22,7 @@ anchor-lang = "1.2.1"
 anchor-spl = { version = "1.2.1", default-features = false, features = ["associated_token", "token", "token_2022", "solana-v3"] }
 
 [workspace]
-members = [".", "examples/launchpad"]
+members = [".", "examples/launchpad", "examples/launchpad/tests/forwarder"]
 resolver = "2"
 
 [workspace.package]

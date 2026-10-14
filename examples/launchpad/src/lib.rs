@@ -7,6 +7,7 @@
 
 use anchor_lang::{
     prelude::*,
+    solana_program::instruction::{get_stack_height, TRANSACTION_LEVEL_STACK_HEIGHT},
     system_program::{transfer, Transfer},
     Discriminator,
 };
@@ -47,6 +48,16 @@ pub mod launchpad {
         lp_recipient: Option<Pubkey>,
     ) -> Result<()> {
         let a = &mut *ctx.accounts;
+        // The graduation authority can't close its LP account while holding
+        // the LP, so it (or our other PDAs) as recipient would block
+        // graduation for good.
+        if let Some(recipient) = lp_recipient {
+            let mint = a.mint.key();
+            for seed in [GRADUATION_SEED, POOL_SEED, LAUNCH_SEED] {
+                let (ours, _) = Pubkey::find_program_address(&[seed, mint.as_ref()], &crate::ID);
+                require_keys_neq!(recipient, ours, LaunchpadError::WrongLpRecipient);
+            }
+        }
         a.launch.set_inner(Launch {
             mint: a.mint.key(),
             sol_amount,
@@ -86,16 +97,22 @@ pub mod launchpad {
     /// by a CPI that doesn't include both accounts. Doing it in its own
     /// instruction lets `graduate` use ordinary CPIs throughout.
     ///
-    /// The next instruction must be `graduate`, so the transaction either
-    /// graduates or reverts; nobody can move the SOL and leave it stranded.
+    /// The next instruction must be `graduate` for the same launch, so the
+    /// transaction either graduates or reverts; nobody can move the SOL and
+    /// leave it stranded. Called directly only: under a CPI, the "next
+    /// instruction" would be the caller's, not ours.
     pub fn prepare(ctx: Context<Prepare>) -> Result<()> {
         let ixs = ctx.accounts.instructions.to_account_info();
         let next = load_current_index_checked(&ixs)?
             .checked_add(1)
             .and_then(|i| load_instruction_at_checked(i.into(), &ixs).ok());
+        let launch_key = ctx.accounts.launch.key();
         require!(
-            next.is_some_and(|ix| ix.program_id == crate::ID
-                && ix.data.starts_with(instruction::Graduate::DISCRIMINATOR)),
+            get_stack_height() == TRANSACTION_LEVEL_STACK_HEIGHT
+                && next.is_some_and(|ix| ix.program_id == crate::ID
+                    && ix.data.starts_with(instruction::Graduate::DISCRIMINATOR)
+                    // Graduate's accounts: payer, launch, ...
+                    && ix.accounts.get(1).is_some_and(|m| m.pubkey == launch_key)),
             LaunchpadError::GraduateMustFollow
         );
         let launch = &mut ctx.accounts.launch;
@@ -203,9 +220,9 @@ pub enum LaunchpadError {
     AlreadyPrepared,
     #[msg("Run prepare first, in the same transaction")]
     NotPrepared,
-    #[msg("prepare must be followed by graduate")]
+    #[msg("prepare must be called directly and followed by graduate for the same launch")]
     GraduateMustFollow,
-    #[msg("LP recipient accounts don't match the launch")]
+    #[msg("LP recipient accounts don't match the launch, or the recipient is one of our PDAs")]
     WrongLpRecipient,
 }
 
