@@ -4,11 +4,11 @@
 lock the liquidity.** The last step of every bonding-curve launchpad, done
 safely in one function call.
 
-> **⚠️ For learning and experimenting, not for mainnet (yet).** Unaudited.
+> **For learning and experimenting, not for mainnet (yet).** Unaudited.
 > Build and test with it on devnet or localnet; don't put real users' funds
 > behind it. The licences come with no warranty.
 
-📘 **Diagrams, the integration guide, the security checklist and the devnet
+**Diagrams, the integration guide, the security checklist and the devnet
 proof are on [GitHub](https://github.com/KevinGod1234/anchor-raydium-cpmm).**
 
 ## What it does

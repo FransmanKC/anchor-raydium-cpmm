@@ -78,7 +78,7 @@ the rest:
 - **Quote token is SOL only.** No USDC or other quote tokens yet.
 - **Token-2022 extensions**, tested against the mainnet Raydium program:
 
-  | ✅ Graduates | ❌ Doesn't graduate (the transaction reverts) |
+  | Graduates | Doesn't graduate (the transaction reverts) |
   |---|---|
   | no extensions | permanent delegate |
   | metadata pointer | mint close authority |
@@ -115,13 +115,13 @@ found is fixed and covered by a regression test:
 
 | Severity | Where | Issue | Fix |
 |---|---|---|---|
-| 🔴 Critical | Example | Any caller could name the LP recipient, take every LP token and withdraw the whole pool. | Recipient fixed at launch creation and checked; `SendTo` documented. |
-| 🟠 Medium | Example | Fee tier not pinned: the first caller chose it, forever. | Pinned to tier 0 by Raydium's seeds. |
-| 🟡 Low | Example | `prepare` alone could strand the SOL if graduation then failed. | `prepare` requires `graduate` next. |
-| 🟡 Low | Crate | Base mint writability not checked (a donated token could then block graduation). | Checked. |
-| 🟡 Low | Example | `prepare` called through another program got past that check. | `prepare` must be called directly, followed by `graduate` of the same launch. |
-| 🔵 Info | Example | The creator could name one of our PDAs as LP recipient, making graduation impossible. | Refused at `create_launch`. |
-| 🔵 Info | Docs | Launches that can never graduate, freeze authority, unchecked `open_time`. | Documented in the [checklist](#checklist) and [limitations](#limitations). |
+| Critical | Example | Any caller could name the LP recipient, take every LP token and withdraw the whole pool. | Recipient fixed at launch creation and checked; `SendTo` documented. |
+| Medium | Example | Fee tier not pinned: the first caller chose it, forever. | Pinned to tier 0 by Raydium's seeds. |
+| Low | Example | `prepare` alone could strand the SOL if graduation then failed. | `prepare` requires `graduate` next. |
+| Low | Crate | Base mint writability not checked (a donated token could then block graduation). | Checked. |
+| Low | Example | `prepare` called through another program got past that check. | `prepare` must be called directly, followed by `graduate` of the same launch. |
+| Info | Example | The creator could name one of our PDAs as LP recipient, making graduation impossible. | Refused at `create_launch`. |
+| Info | Docs | Launches that can never graduate, freeze authority, unchecked `open_time`. | Documented in the [checklist](#checklist) and [limitations](#limitations). |
 
 Checked and found safe: SOL sent ahead of time to any address the graduation
 creates; rival pools at Raydium's default address; swapped program IDs; price

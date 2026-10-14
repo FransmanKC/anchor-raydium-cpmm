@@ -31,22 +31,22 @@ the crate copes either way.
 
 | Field | Writable | Signer | What / who checks it |
 |---|:---:|:---:|---|
-| `payer` | ✓ | tx | Fronts the fee and rent; gets the unspent part back. |
-| `authority` | ✓ | PDA | System-owned PDA of your program; must already hold `sol_amount`. Signs as pool creator. |
-| `base_mint` | ✓ | | The token. Owner must be `base_token_program`; must be writable (both checked by the crate) because stray tokens are burned. |
-| `token_source` | ✓ | | Your vault holding the tokens. |
+| `payer` | yes | tx | Fronts the fee and rent; gets the unspent part back. |
+| `authority` | yes | PDA | System-owned PDA of your program; must already hold `sol_amount`. Signs as pool creator. |
+| `base_mint` | yes | | The token. Owner must be `base_token_program`; must be writable (both checked by the crate) because stray tokens are burned. |
+| `token_source` | yes | | Your vault holding the tokens. |
 | `token_source_authority` | | PDA or tx | Owner of `token_source`. |
-| `authority_base_account` | ✓ | | `authority`'s associated token account for the mint. Created and closed here. |
-| `authority_wsol_account` | ✓ | | `authority`'s wrapped-SOL account. Created and closed here. |
-| `authority_lp_account` | ✓ | | `authority`'s LP account. Raydium creates it; closed here. |
-| `pool_state` | ✓ | PDA | Your pool PDA. Raydium creates it; only your program can sign for it. |
+| `authority_base_account` | yes | | `authority`'s associated token account for the mint. Created and closed here. |
+| `authority_wsol_account` | yes | | `authority`'s wrapped-SOL account. Created and closed here. |
+| `authority_lp_account` | yes | | `authority`'s LP account. Raydium creates it; closed here. |
+| `pool_state` | yes | PDA | Your pool PDA. Raydium creates it; only your program can sign for it. |
 | `amm_config` | | | Raydium fee tier. Owner checked by the crate; pin the tier yourself (`pda::amm_config(index)`). |
 | `raydium_authority` | | | `pda::pool_authority()`; checked by Raydium. |
-| `lp_mint` | ✓ | | `pda::lp_mint(pool)`; created by Raydium. |
-| `base_vault` | ✓ | | `pda::vault(pool, mint)`; created by Raydium. |
-| `wsol_vault` | ✓ | | `pda::vault(pool, WSOL)`; created by Raydium. |
-| `observation_state` | ✓ | | `pda::observation(pool)`; created by Raydium. |
-| `create_pool_fee_receiver` | ✓ | | `ids::CREATE_POOL_FEE_RECEIVER`; checked by Raydium. |
+| `lp_mint` | yes | | `pda::lp_mint(pool)`; created by Raydium. |
+| `base_vault` | yes | | `pda::vault(pool, mint)`; created by Raydium. |
+| `wsol_vault` | yes | | `pda::vault(pool, WSOL)`; created by Raydium. |
+| `observation_state` | yes | | `pda::observation(pool)`; created by Raydium. |
+| `create_pool_fee_receiver` | yes | | `ids::CREATE_POOL_FEE_RECEIVER`; checked by Raydium. |
 | `wsol_mint` | | | `So111…112`; checked by the crate. |
 | `token_program` | | | SPL Token (wrapped SOL and the LP mint); checked by the crate. |
 | `base_token_program` | | | SPL Token or Token-2022; checked by the crate. |

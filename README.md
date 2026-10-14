@@ -5,6 +5,8 @@
 **Graduate a token from your Anchor program into a Raydium pool, and lock the liquidity.**<br/>
 The last step of every bonding-curve launchpad, done safely in one function call.
 
+[![crates.io](https://img.shields.io/crates/v/anchor-raydium-cpmm.svg)](https://crates.io/crates/anchor-raydium-cpmm)
+[![docs.rs](https://img.shields.io/docsrs/anchor-raydium-cpmm)](https://docs.rs/anchor-raydium-cpmm)
 [![CI](https://github.com/KevinGod1234/anchor-raydium-cpmm/actions/workflows/ci.yml/badge.svg)](https://github.com/KevinGod1234/anchor-raydium-cpmm/actions/workflows/ci.yml)
 [![Status: educational](https://img.shields.io/badge/status-educational%20%C2%B7%20unaudited-orange)](#status)
 [![Devnet: verified](https://img.shields.io/badge/devnet-verified-14F195?logo=solana&logoColor=white)](#proof-it-works)
@@ -14,9 +16,9 @@ The last step of every bonding-curve launchpad, done safely in one function call
 </div>
 
 > [!WARNING]
-> **For learning and experimenting, not for mainnet (yet).** Unaudited and not
-> on crates.io. Build and test with it on devnet or localnet; don't put real
-> users' funds behind it. The licences come with no warranty.
+> **For learning and experimenting, not for mainnet (yet).** Unaudited.
+> Build and test with it on devnet or localnet; don't put real users' funds
+> behind it. The licences come with no warranty.
 
 ## What it does
 
@@ -26,9 +28,9 @@ can pull the liquidity out of. That is **graduation**:
 
 ```mermaid
 flowchart LR
-    A["🪙 <b>Your launch</b><br/>SOL raised + token reserve<br/><i>amounts tracked in your state</i>"]
-    B["🏊 <b>Raydium CPMM pool</b><br/>at an address only<br/>your program controls"]
-    C["🔥 <b>LP tokens burned</b><br/>liquidity locked forever"]
+    A["<b>Your launch</b><br/>SOL raised + token reserve<br/><i>amounts tracked in your state</i>"]
+    B["<b>Raydium CPMM pool</b><br/>at an address only<br/>your program controls"]
+    C["<b>LP tokens burned</b><br/>liquidity locked forever"]
     A -->|"prepare + graduate<br/>(one transaction)"| B --> C
 ```
 
@@ -49,7 +51,7 @@ sequenceDiagram
     P->>A: wrap exactly sol_amount,<br/>move exactly token_amount
     A->>R: initialize pool at your pool PDA
     R-->>A: LP tokens
-    A->>A: burn LP 🔥, burn stray tokens,<br/>close temporary accounts
+    A->>A: burn LP, burn stray tokens,<br/>close temporary accounts
     A-->>Caller: refund what wasn't spent
 ```
 
@@ -57,9 +59,11 @@ sequenceDiagram
 
 ```toml
 [dependencies]
-# Pin a commit: the API can change before 1.0. Add features = ["devnet"] for devnet.
-anchor-raydium-cpmm = { git = "https://github.com/KevinGod1234/anchor-raydium-cpmm", rev = "<commit>" }
+anchor-raydium-cpmm = "0.1"   # features = ["devnet"] for Raydium's devnet
 ```
+
+Before 1.0, breaking changes bump the minor version (0.1 → 0.2), so `"0.1"`
+only picks up compatible fixes.
 
 Your `graduate` instruction pins its accounts (copy the
 [example's `Graduate` struct](examples/launchpad/src/lib.rs)), then makes one
@@ -103,12 +107,12 @@ including the `prepare` instruction you write yourself.
 
 | Pitfall | What could go wrong | How it's handled |
 |---|---|---|
-| 🏃 **Front-running the pool** | Someone creates your pool first and sets the opening price. | The pool lives at a PDA of *your* program. Only you can sign for it. |
-| 💸 **Inflated balances** | Anyone can send SOL or tokens to any account, skewing a pool funded "from the balance". | The pool gets exactly the amounts you pass in. Planted tokens are burned. |
-| 🧩 **The 20-account CPI** | One wrong writable or signer flag, or mints in the wrong order, and `initialize` fails. | Built and tested for both mint orderings, on SPL Token and Token-2022. |
-| 🔓 **Pulling the liquidity** | Whoever holds the LP tokens can withdraw the whole pool. | `LpLock::Burn` burns them all, or `SendTo` an owner you fixed beforehand. |
-| 🧹 **Plumbing** | Wrapping SOL, temporary accounts, fees, rent, refunds. | Done for you; temporary accounts closed, unspent SOL refunded. |
-| ⛓️ **Two-instruction rule** | Solana rejects a direct lamport move followed by a CPI in one instruction. | `prepare` + `graduate`, with the guard pattern [documented](docs/integration.md#3-write-prepare). |
+| **Front-running the pool** | Someone creates your pool first and sets the opening price. | The pool lives at a PDA of *your* program. Only you can sign for it. |
+| **Inflated balances** | Anyone can send SOL or tokens to any account, skewing a pool funded "from the balance". | The pool gets exactly the amounts you pass in. Planted tokens are burned. |
+| **The 20-account CPI** | One wrong writable or signer flag, or mints in the wrong order, and `initialize` fails. | Built and tested for both mint orderings, on SPL Token and Token-2022. |
+| **Pulling the liquidity** | Whoever holds the LP tokens can withdraw the whole pool. | `LpLock::Burn` burns them all, or `SendTo` an owner you fixed beforehand. |
+| **Plumbing** | Wrapping SOL, temporary accounts, fees, rent, refunds. | Done for you; temporary accounts closed, unspent SOL refunded. |
+| **Two-instruction rule** | Solana rejects a direct lamport move followed by a CPI in one instruction. | `prepare` + `graduate`, with the guard pattern [documented](docs/integration.md#3-write-prepare). |
 
 Your own program still has a few duties (graduate once, pin the fee tier,
 check a launch *can* graduate). They're on the
@@ -139,20 +143,21 @@ check a launch *can* graduate). They're on the
 
 | | |
 |---|---|
-| ✅ | Pool creation at your PDA, exact amounts, LP burn or delivery, cleanup |
-| ✅ | SPL Token and Token-2022 base mints, mainnet and devnet |
-| ✅ | Tested on mainnet bytecode, verified on devnet |
-| ⚠️ | Not audited, not on crates.io; educational use |
-| ❌ | Quote tokens other than SOL, swaps, adding/removing liquidity, AMM v4 / CLMM |
+| **Done** | Pool creation at your PDA, exact amounts, LP burn or delivery, cleanup |
+| **Done** | SPL Token and Token-2022 base mints, mainnet and devnet |
+| **Done** | Tested on mainnet bytecode, verified on devnet, published on crates.io |
+| **Caveat** | Not audited; educational use |
+| **Not supported** | Quote tokens other than SOL, swaps, adding/removing liquidity, AMM v4 / CLMM |
 
 ## Documentation
 
 | | |
 |---|---|
-| 📘 [Integration guide](docs/integration.md) | Step by step: PDAs, `prepare`, `graduate`, fee tier, devnet |
-| 📗 [Reference](docs/reference.md) | API, all 23 accounts, costs, error codes, troubleshooting |
-| 📕 [Security](docs/security.md) | Your checklist, limitations, the security reviews |
-| 🧪 [Example program](examples/launchpad/src/lib.rs) | A complete launchpad to copy from |
+| [Integration guide](docs/integration.md) | Step by step: PDAs, `prepare`, `graduate`, fee tier, devnet |
+| [Reference](docs/reference.md) | API, all 23 accounts, costs, error codes, troubleshooting |
+| [API docs on docs.rs](https://docs.rs/anchor-raydium-cpmm) | Generated from the source |
+| [Security](docs/security.md) | Your checklist, limitations, the security reviews |
+| [Example program](examples/launchpad/src/lib.rs) | A complete launchpad to copy from |
 
 ## Repository layout
 
